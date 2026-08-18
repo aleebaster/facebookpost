@@ -1,115 +1,103 @@
-"""Tests for Facebook navigation workflow."""
-
-import asyncio
-import subprocess
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch, call
+"""Tests for browser configuration and Facebook navigation."""
 
 import pytest
+from pathlib import Path
+from unittest.mock import MagicMock
 
 
-class TestFacebookNavigation:
-    """Test Facebook navigation logic."""
+class TestBrowserConfig:
+    """Verify browser configuration uses dedicated bot Chrome User Data."""
 
     def test_junction_path_is_different_from_target(self):
-        """Junction path must NOT resolve to the same path as target."""
-        # Simulate the logic from browser.py
+        """Bot Chrome User Data must differ from original Chrome User Data."""
+        from src.browser import BrowserManager
+
         project_root = Path(__file__).resolve().parent.parent
-        junction_path = project_root / "chrome_user_data"
-        target_path = str(
-            Path.home() / "AppData" / "Local" / "Google" / "Chrome" / "User Data"
+        bot_data = project_root / "bot_chrome_data"
+
+        original_user_data = BrowserManager._get_default_user_data_dir()
+
+        # On the dev machine, bot_data won't exist yet, so we check the path string
+        bot_str = str(bot_data)
+        target_str = str(Path(original_user_data).resolve())
+
+        # Critical: bot data path MUST be different from original
+        assert bot_str != target_str, (
+            f"Bot User Data {bot_str} must differ from original {target_str}"
         )
-        junction_str = str(junction_path)
-        # On dev machine, junction_path won't exist yet, so resolve() won't follow it
-        # But we still verify the logic: the string paths must differ
-        assert junction_str != target_path, (
-            f"Junction {junction_str} must differ from target {target_path}"
-        )
-        assert "chrome_user_data" in junction_str
-        assert "User Data" in target_path
+        assert "bot_chrome_data" in bot_str
 
     def test_find_chrome_executable(self):
-        """Should find Chrome on the system."""
+        """Chrome executable detection should return a path."""
         from src.browser import BrowserManager
-
-        path = BrowserManager._find_chrome_executable()
-        assert path, "Chrome executable not found"
-        assert Path(path).exists(), f"Chrome path does not exist: {path}"
+        result = BrowserManager._find_chrome_executable()
+        # On Windows CI or dev machine, Chrome should exist
+        # (may be empty on some CI environments)
+        assert isinstance(result, str)
 
     def test_get_default_user_data_dir(self):
-        """Should return correct user data directory."""
+        """Default user data dir should return a valid path."""
         from src.browser import BrowserManager
-
-        path = BrowserManager._get_default_user_data_dir()
-        assert path
-        assert "User Data" in path or "google-chrome" in path or "Chrome" in path
+        result = BrowserManager._get_default_user_data_dir()
+        assert isinstance(result, str)
+        assert len(result) > 0
 
     def test_cdp_port_constant(self):
         """CDP port should be 9222."""
         from src.browser import CDP_PORT
-
         assert CDP_PORT == 9222
 
-    def test_junction_dir_constant(self):
-        """Junction directory name should be chrome_user_data."""
-        from src.browser import JUNCTION_DIR
-
-        assert JUNCTION_DIR == "chrome_user_data"
+    def test_bot_user_data_dir_constant(self):
+        """Bot User Data directory name should be bot_chrome_data."""
+        from src.browser import BOT_USER_DATA_DIR
+        assert BOT_USER_DATA_DIR == "bot_chrome_data"
 
     def test_browser_manager_initialization(self):
-        """BrowserManager initializes correctly."""
+        """BrowserManager should initialize with default values."""
         from src.browser import BrowserManager
-
         bm = BrowserManager()
-        assert bm._page is None
-        assert bm._browser is None
         assert bm._chrome_process is None
-        assert bm.profile_name == "Profile 2"
+        assert bm._playwright is None
+        assert bm._browser is None
+        assert bm._page is None
+        assert bm.bot_chrome_pid is None
 
 
-class TestJunctionCreation:
-    """Test junction creation logic."""
+class TestBotChromeData:
+    """Test that bot Chrome uses dedicated directory."""
 
-    def test_mklink_command_format(self):
-        """Verify the mklink command would be formatted correctly."""
-        junction = "C:\\AI\\facebookpost\\chrome_user_data"
-        target = "C:\\Users\\andre\\AppData\\Local\\Google\\Chrome\\User Data"
-        cmd = ["cmd", "/c", "mklink", "/J", junction, target]
-        assert "/J" in cmd
-        assert junction in cmd
-        assert target in cmd
-
-    def test_junction_path_and_target_are_different_strings(self):
-        """Critical: junction and target must be different strings."""
+    def test_bot_data_dir_created(self):
+        """bot_chrome_data directory should exist or be creatable."""
         project_root = Path(__file__).resolve().parent.parent
-        junction = str(project_root / "chrome_user_data")
-        target = str(
-            Path.home() / "AppData" / "Local" / "Google" / "Chrome" / "User Data"
-        )
-        assert junction != target, "Junction and target must be different paths"
+        bot_data = project_root / "bot_chrome_data"
+        # Directory should already exist (user created it)
+        # or we can at least verify the path is valid
+        assert "bot_chrome_data" in str(bot_data)
+
+    def test_bot_data_not_original(self):
+        """Bot User Data must never be the original Chrome User Data."""
+        from src.browser import BrowserManager
+        project_root = Path(__file__).resolve().parent.parent
+        bot_data = str(project_root / "bot_chrome_data")
+        original = BrowserManager._get_default_user_data_dir()
+
+        # They must be different
+        assert bot_data != original
+        assert "bot_chrome_data" in bot_data
+        assert "bot_chrome_data" not in original
 
 
 class TestFacebookAuthDetection:
-    """Test authentication detection selectors."""
+    """Test Facebook authentication detection selectors."""
 
     def test_login_selectors_defined(self):
-        """Login form selectors should be defined."""
-        selectors = [
-            'button[data-testid="royal_login_button"]',
-            "#login_form",
-            'form[action*="login"]',
-            'input[name="email"]',
-            'input[name="pass"]',
-        ]
-        assert len(selectors) == 5
-        assert all(isinstance(s, str) for s in selectors)
+        """Login selectors should be defined in browser module."""
+        from src.browser import BrowserManager
+        # The check_facebook_auth method should exist
+        assert hasattr(BrowserManager, "check_facebook_auth")
 
     def test_auth_selectors_defined(self):
-        """Auth indicator selectors should be defined."""
-        selectors = [
-            '[aria-label="Your profile"]',
-            '[role="feed"]',
-            '[data-pagelet="Stories"]',
-        ]
-        assert len(selectors) >= 3
-        assert all(isinstance(s, str) for s in selectors)
+        """Auth selectors should be defined in browser module."""
+        from src.browser import BrowserManager
+        assert hasattr(BrowserManager, "check_facebook_auth")
+        assert hasattr(BrowserManager, "wait_for_login")

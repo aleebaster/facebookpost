@@ -13,38 +13,36 @@ import yaml
 from src.browser import BrowserManager
 
 
-def test_config_uses_profile_2():
-    """Test that config.yaml specifies Profile 2."""
+def test_config_uses_default_profile():
+    """Test that config.yaml specifies Default profile for bot Chrome."""
     with open("config.yaml", "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
     browser_config = config.get("browser", {})
     profile_name = browser_config.get("profile_name", "")
-    assert profile_name == "Profile 2", f"Expected Profile 2, got: {profile_name}"
-    print("PASS: config.yaml uses Profile 2")
+    assert profile_name == "Default", f"Expected Default, got: {profile_name}"
+    print("PASS: config.yaml uses Default profile")
 
 
-def test_config_user_data_dir_not_profile():
-    """Test that user_data_dir does not point to a profile subfolder."""
+def test_config_user_data_dir_empty_or_bot():
+    """Test that user_data_dir is empty (uses bot_chrome_data) or points to bot data."""
     with open("config.yaml", "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
     user_data_dir = config.get("browser", {}).get("user_data_dir", "")
-    # user_data_dir should be the Chrome User Data root, not a profile folder
-    assert "Profile" not in user_data_dir, (
-        f"user_data_dir should not contain 'Profile': {user_data_dir}"
-    )
-    assert "User Data" in user_data_dir or not user_data_dir, (
-        f"user_data_dir should point to Chrome User Data: {user_data_dir}"
-    )
-    print("PASS: user_data_dir does not point to profile subfolder")
+    # user_data_dir should be empty (default = bot_chrome_data) or bot_chrome_data path
+    if user_data_dir:
+        assert "bot_chrome_data" in user_data_dir, (
+            f"user_data_dir should point to bot_chrome_data: {user_data_dir}"
+        )
+    print("PASS: user_data_dir is empty or uses bot_chrome_data")
 
 
 def test_browser_manager_default_profile():
-    """Test that BrowserManager defaults to Profile 2."""
+    """Test that BrowserManager defaults to Default profile."""
     bm = BrowserManager()
-    assert bm.profile_name == "Profile 2", f"Expected Profile 2, got: {bm.profile_name}"
-    print("PASS: BrowserManager defaults to Profile 2")
+    assert bm.profile_name == "Default", f"Expected Default, got: {bm.profile_name}"
+    print("PASS: BrowserManager defaults to Default profile")
 
 
 def test_browser_manager_custom_profile():
@@ -96,8 +94,8 @@ def test_no_channel_chrome():
 
 
 if __name__ == "__main__":
-    test_config_uses_profile_2()
-    test_config_user_data_dir_not_profile()
+    test_config_uses_default_profile()
+    test_config_user_data_dir_empty_or_bot()
     test_browser_manager_default_profile()
     test_browser_manager_custom_profile()
     test_find_chrome_executable()

@@ -1,19 +1,19 @@
 """
 Browser management module.
 
-Chrome 151 blocks remote debugging (both --remote-debugging-port and
---remote-debugging-pipe) when used with the DEFAULT User Data directory.
-Error: "DevTools remote debugging requires a non-default data directory."
+Uses a DEDICATED Chrome User Data directory for the bot:
+  bot_chrome_data/
 
-Solution: Create a directory junction from chrome_user_data -> original User Data.
-Chrome sees it as "non-default" and allows remote debugging.
-The junction points to the EXACT SAME files, so the original Profile 2
-and Facebook session are preserved.
+The bot NEVER touches the user's original Chrome User Data.
+The bot NEVER creates junctions or copies profiles.
+The bot NEVER kills other Chrome processes.
 
 Architecture:
-  Python -> Playwright CDP client -> System Google Chrome -> junction -> original User Data/Profile 2
+  Python -> Playwright CDP client -> System Google Chrome -> bot_chrome_data
 
-IMPORTANT: Chrome must be CLOSED before running the bot.
+Session persistence:
+  After LOGIN, Facebook session is stored in bot_chrome_data.
+  Subsequent runs use the same directory automatically.
 """
 
 import asyncio
@@ -30,17 +30,21 @@ from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 # Chrome debugging port
 CDP_PORT = 9222
 
-# Junction directory name (points to original User Data)
-JUNCTION_DIR = "chrome_user_data"
+# Dedicated bot Chrome User Data directory
+BOT_USER_DATA_DIR = "bot_chrome_data"
 
 
 class BrowserManager:
-    """Manages system Chrome via Chrome DevTools Protocol (CDP)."""
+    """Manages a dedicated system Chrome instance via Chrome DevTools Protocol (CDP).
+
+    The bot uses its OWN Chrome User Data directory (bot_chrome_data/),
+    completely separate from the user's regular Chrome.
+    """
 
     def __init__(
         self,
         user_data_dir: str = "",
-        profile_name: str = "Profile 2",
+        profile_name: str = "Default",
         chrome_binary: str = "",
         headless: bool = False,
         slow_mo: int = 100,
@@ -56,116 +60,110 @@ class BrowserManager:
         self._context: Optional[BrowserContext] = None
         self._page: Optional[Page] = None
         self._chrome_process: Optional[subprocess.Popen] = None
+        self._bot_chrome_pid: Optional[int] = None
+
+    @property
+    def bot_chrome_pid(self) -> Optional[int]:
+        """Return the PID of the bot's own Chrome instance."""
+        return self._bot_chrome_pid
 
     async def start(self) -> Page:
         """
-        Launch system Chrome with Profile 2 via CDP.
+        Launch system Chrome with dedicated bot User Data via CDP.
 
         Steps:
-          [1] Validate paths
-          [2] Create junction to original User Data
-          [3] Launch Chrome with junction + CDP
-          [4] Connect Playwright via CDP
-          [5] Select working page
-          [6] Navigate to Facebook
+          [1] Resolve and validate paths
+          [2] Ensure bot Chrome User Data exists
+          [3] Launch Chrome with bot_chrome_data + CDP
+          [4] Wait for CDP port
+          [5] Connect Playwright via CDP
+          [6] Select working page
         """
         t0 = time.time()
 
         # -- [1] Resolve and validate paths --
         chrome_path = self.chrome_binary or self._find_chrome_executable()
-        user_data = self.user_data_dir or self._get_default_user_data_dir()
-        profile_path = Path(user_data) / self.profile_name
 
+        # Determine bot Chrome User Data directory
+        if self.user_data_dir:
+            bot_user_data = self.user_data_dir
+        else:
+            # Default: bot_chrome_data/ in the project root
+            project_root = Path(__file__).resolve().parent.parent
+            bot_user_data = str(project_root / BOT_USER_DATA_DIR)
+
+        # Original Chrome User Data (for diagnostic display only)
+        original_user_data = self._get_default_user_data_dir()
+
+        logger.info("")
         logger.info("=" * 60)
-        logger.info("BROWSER CONFIGURATION")
+        logger.info("BOT CHROME CONFIGURATION")
         logger.info("=" * 60)
-        logger.info("Browser: SYSTEM GOOGLE CHROME")
-        logger.info(f"  Executable:     {chrome_path}")
-        logger.info(f"  Original User:  {user_data}")
-        logger.info(f"  Original Profile: {profile_path}")
-        logger.info(f"  CDP port:       {CDP_PORT}")
+        logger.info("")
+        logger.info("  Browser: SYSTEM GOOGLE CHROME")
+        logger.info("")
+        logger.info(f"  Executable:")
+        logger.info(f"    {chrome_path}")
+        logger.info("")
+        logger.info(f"  Bot User Data:")
+        logger.info(f"    {bot_user_data}")
+        logger.info("")
+        logger.info(f"  Original Chrome User Data:")
+        logger.info(f"    {original_user_data}")
+        logger.info("")
+        logger.info(f"  Bot uses original User Data:  NO")
+        logger.info(f"  Bot uses dedicated User Data: YES")
+        logger.info("")
+        logger.info(f"  CDP port: {CDP_PORT}")
+        logger.info("")
         logger.info("=" * 60)
 
         logger.info("[1] Validating paths...")
         if not Path(chrome_path).exists():
             raise RuntimeError(f"Chrome executable not found: {chrome_path}")
-        if not Path(user_data).exists():
-            raise RuntimeError(f"User Data directory not found: {user_data}")
-        if not profile_path.exists():
-            raise RuntimeError(f"Profile not found: {profile_path}")
-        logger.info("[1] All paths validated [OK]")
+        logger.info(f"[1] Chrome executable: OK ({chrome_path})")
 
-        # -- [2] Create junction to original User Data --
-        # IMPORTANT: Do NOT use .resolve() — it follows the junction and returns the target.
-        # Use the literal path string so Chrome sees it as "non-default".
-        project_root = Path(__file__).resolve().parent.parent  # facebookpost/
-        junction_path = project_root / JUNCTION_DIR
-        junction_path_str = str(junction_path)  # keep as string, do NOT resolve
-        target_path_str = str(Path(user_data).resolve())
+        # -- [2] Ensure bot Chrome User Data exists --
+        bot_path = Path(bot_user_data)
+        if not bot_path.exists():
+            logger.info(f"[2] Creating bot Chrome User Data: {bot_user_data}")
+            bot_path.mkdir(parents=True, exist_ok=True)
+        else:
+            logger.info(f"[2] Bot Chrome User Data exists: {bot_user_data}")
 
-        logger.info("[2] Creating junction to original User Data...")
-        logger.info(f"    Junction: {junction_path_str}")
-        logger.info(f"    Target:   {target_path_str}")
+        # Verify it's NOT the same as original
+        try:
+            bot_resolved = str(bot_path.resolve())
+            orig_resolved = str(Path(original_user_data).resolve())
+            if bot_resolved == orig_resolved:
+                raise RuntimeError(
+                    f"CRITICAL: Bot User Data is the SAME as original Chrome User Data!\n"
+                    f"  Bot:  {bot_resolved}\n"
+                    f"  Orig: {orig_resolved}\n"
+                    f"Refusing to continue."
+                )
+        except OSError:
+            pass  # Path may not exist yet, that's OK
 
-        # CRITICAL: junction path MUST differ from target
-        if junction_path_str == target_path_str or junction_path_str == user_data:
-            raise RuntimeError(
-                f"CRITICAL: Junction path and target are identical!\n"
-                f"  Junction: {junction_path_str}\n"
-                f"  Target:   {target_path_str}\n"
-                f"Refusing to continue."
-            )
+        logger.info(f"[2] Bot User Data validated: OK")
 
-        # Remove old junction if exists
-        if junction_path.exists():
-            try:
-                junction_path.rmdir()
-            except Exception:
-                pass
-
-        # Remove stale directory if it exists (not a junction)
-        if junction_path.is_dir() and not junction_path.is_symlink():
-            import shutil
-            shutil.rmtree(junction_path, ignore_errors=True)
-
-        # Create junction using Windows mklink /J
-        result = subprocess.run(
-            ["cmd", "/c", "mklink", "/J", junction_path_str, user_data],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-
-        if not junction_path.exists():
-            raise RuntimeError(
-                f"Failed to create junction from {junction_path_str} to {user_data}\n"
-                f"cmd output: {result.stdout} {result.stderr}"
-            )
-
-        # Verify junction works
-        entries = list(junction_path.iterdir())
-        resolved_target = str(junction_path.resolve())
-        logger.info(f"[2] Junction created: {len(entries)} entries")
-        logger.info(f"[2] Resolved target: {resolved_target}")
-        logger.info(f"[2] Profile 2 accessible: {(junction_path / self.profile_name).exists()}")
-        if resolved_target != target_path_str:
-            logger.warning(f"[2] Junction resolves to different path! Expected: {target_path_str}")
-
-        # -- [3] Launch Chrome with junction --
+        # -- [3] Launch Chrome with bot_chrome_data --
         logger.info("[3] Launching system Chrome...")
-        logger.info(f"    Chrome:          {chrome_path}")
-        logger.info(f"    --user-data-dir={junction_path_str}")
-        logger.info(f"    --profile-dir=  {self.profile_name}")
-        logger.info(f"    --debug-port=   {CDP_PORT}")
+        logger.info(f"    Chrome:           {chrome_path}")
+        logger.info(f"    --user-data-dir: {bot_user_data}")
+        logger.info(f"    --debug-port:    {CDP_PORT}")
 
         chrome_args = [
             chrome_path,
             f"--remote-debugging-port={CDP_PORT}",
-            f"--user-data-dir={junction_path_str}",
-            f"--profile-directory={self.profile_name}",
+            f"--user-data-dir={bot_user_data}",
             "--no-first-run",
             "--no-default-browser-check",
         ]
+
+        # Log full command line for verification
+        logger.info("[3] Chrome command line:")
+        logger.info(f"    {' '.join(chrome_args)}")
 
         try:
             self._chrome_process = subprocess.Popen(
@@ -173,10 +171,12 @@ class BrowserManager:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
+            self._bot_chrome_pid = self._chrome_process.pid
         except Exception as e:
             raise RuntimeError(f"Failed to launch Chrome: {e}")
 
-        logger.info(f"[3] Chrome started (PID: {self._chrome_process.pid})")
+        logger.info(f"[3] Chrome started")
+        logger.info(f"    BOT CHROME PID: {self._bot_chrome_pid}")
 
         # -- [4] Wait for CDP port --
         logger.info("[4] Waiting for Chrome debugging port...")
@@ -185,7 +185,7 @@ class BrowserManager:
             raise RuntimeError(
                 f"Chrome did not open debugging port {CDP_PORT} within 20 seconds."
             )
-        logger.info(f"[4] Debugging port {CDP_PORT} ready [OK]")
+        logger.info(f"[4] CDP port {CDP_PORT} ready [OK]")
 
         # -- [5] Connect Playwright via CDP --
         logger.info("[5] Connecting Playwright to Chrome via CDP...")
@@ -286,30 +286,49 @@ class BrowserManager:
             return False
 
     async def stop(self):
-        """Disconnect from Chrome and clean up."""
+        """Disconnect from Chrome and clean up.
+
+        Only terminates the bot's own Chrome process (identified by PID).
+        NEVER kills other Chrome instances.
+        """
         logger.info("Disconnecting from Chrome...")
+
         if self._browser:
             try:
                 await self._browser.close()
             except Exception:
                 pass
             self._browser = None
+
         if self._playwright:
             try:
                 await self._playwright.stop()
             except Exception:
                 pass
             self._playwright = None
+
+        # Only kill our own Chrome process by PID
         if self._chrome_process:
+            pid = self._chrome_process.pid
+            logger.info(f"Stopping bot Chrome (PID: {pid})...")
             try:
                 self._chrome_process.terminate()
                 self._chrome_process.wait(timeout=5)
+                logger.info(f"Bot Chrome stopped (PID: {pid})")
+            except subprocess.TimeoutExpired:
+                try:
+                    self._chrome_process.kill()
+                    logger.info(f"Bot Chrome killed (PID: {pid})")
+                except Exception:
+                    logger.warning(f"Could not stop bot Chrome (PID: {pid})")
             except Exception:
                 try:
                     self._chrome_process.kill()
                 except Exception:
                     pass
             self._chrome_process = None
+            self._bot_chrome_pid = None
+
         self._page = None
         logger.info("Disconnected")
 
@@ -491,7 +510,7 @@ class BrowserManager:
 
     @staticmethod
     def _get_default_user_data_dir() -> str:
-        """Get default Chrome user data directory for the platform."""
+        """Get default Chrome user data directory for the platform (for display only)."""
         if sys.platform == "win32":
             return str(Path.home() / "AppData" / "Local" / "Google" / "Chrome" / "User Data")
         elif sys.platform == "darwin":

@@ -10,14 +10,13 @@ browser:
   # Path to Chrome binary (empty = system default)
   chrome_binary: ""
 
-  # Path to Chrome user data directory
-  # On Windows: C:\Users\<username>\AppData\Local\Google\Chrome\User Data
-  # Do NOT point this to a specific profile folder.
-  user_data_dir: "C:\\Users\\andre\\AppData\\Local\\Google\\Chrome\\User Data"
+  # Bot Chrome User Data directory (DEDICATED — never touches user's Chrome)
+  # Leave empty to use bot_chrome_data/ in the project root
+  user_data_dir: ""
 
-  # Chrome profile directory name within user_data_dir
-  # This is the folder name inside "User Data", e.g. "Default", "Profile 1", "Profile 2"
-  profile_name: "Profile 2"
+  # Chrome profile directory name within bot Chrome User Data
+  # Default is fine for a fresh bot profile
+  profile_name: "Default"
 
   # Headless mode (RECOMMENDED: false — you need to see and authorize)
   headless: false

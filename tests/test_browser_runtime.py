@@ -1,71 +1,87 @@
-"""Runtime diagnostic test for browser configuration."""
+"""Runtime diagnostic test for browser configuration.
 
-import asyncio
-import subprocess
+This test checks that:
+1. Chrome executable exists
+2. bot_chrome_data directory exists
+3. CDP port is free
+4. BrowserManager initializes correctly
+
+Run with: python tests/test_browser_runtime.py
+"""
+
 import sys
-import time
 from pathlib import Path
 
-from src.browser import BrowserManager, CDP_PORT, JUNCTION_DIR
 
-
-def test_chrome_diagnostic():
-    """Print diagnostic info about Chrome configuration."""
-    bm = BrowserManager()
-    project_root = Path(__file__).resolve().parent.parent
-    junction_path = project_root / JUNCTION_DIR
-    target_path = bm._get_default_user_data_dir()
-
-    print("\n" + "=" * 60)
-    print("CHROME DIAGNOSTIC")
+def main():
     print("=" * 60)
+    print("BROWSER RUNTIME DIAGNOSTIC")
+    print("=" * 60)
+    print()
 
-    chrome = bm._find_chrome_executable()
-    print(f"\n[1] Chrome executable: {chrome}")
-    print(f"    Exists: {Path(chrome).exists() if chrome else 'N/A'}")
+    # Add project root to path
+    project_root = Path(__file__).resolve().parent.parent
+    sys.path.insert(0, str(project_root))
 
-    print(f"\n[2] Original User Data: {target_path}")
-    print(f"    Exists: {Path(target_path).exists()}")
+    from src.browser import BrowserManager, CDP_PORT, BOT_USER_DATA_DIR
 
-    profile_path = Path(target_path) / bm.profile_name
-    print(f"    Profile 2: {profile_path}")
-    print(f"    Exists: {profile_path.exists()}")
+    # [1] Chrome executable
+    chrome = BrowserManager._find_chrome_executable()
+    print(f"[1] Chrome executable:")
+    print(f"    {chrome}")
+    print(f"    Exists: {'YES' if chrome and Path(chrome).exists() else 'NO'}")
+    print()
 
-    print(f"\n[3] Junction path: {str(junction_path)}")
-    print(f"    Junction target: {target_path}")
+    # [2] Original Chrome User Data (display only)
+    original = BrowserManager._get_default_user_data_dir()
+    print(f"[2] Original Chrome User Data (display only):")
+    print(f"    {original}")
+    print(f"    Exists: {'YES' if Path(original).exists() else 'NO'}")
+    print()
 
-    # Critical check: junction path != target path
-    junction_str = str(junction_path)
-    target_str = str(Path(target_path).resolve())
-    print(f"    Junction == Target: {junction_str == target_str}")
-    if junction_str == target_str:
-        print("    *** BUG: Junction and target are identical! ***")
-    else:
-        print(f"    OK: Junction ({junction_str}) != Target ({target_str})")
+    # [3] Bot Chrome User Data
+    bot_data = project_root / BOT_USER_DATA_DIR
+    bot_data_str = str(bot_data)
+    print(f"[3] Bot Chrome User Data:")
+    print(f"    {bot_data_str}")
+    print(f"    Exists: {'YES' if bot_data.exists() else 'NO'}")
+    print()
 
-    print(f"\n[4] CDP port: {CDP_PORT}")
-
-    print(f"\n[5] Chrome running:")
+    # [4] Verify bot data != original
     try:
-        result = subprocess.run(
-            ["tasklist", "/FI", "IMAGENAME eq chrome.exe"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        lines = [l for l in result.stdout.split("\n") if "chrome.exe" in l.lower()]
-        print(f"    Processes: {len(lines)}")
-        for line in lines[:5]:
-            print(f"      {line.strip()}")
-    except Exception as e:
-        print(f"    Error: {e}")
+        bot_resolved = str(bot_data.resolve())
+        orig_resolved = str(Path(original).resolve())
+        is_different = bot_resolved != orig_resolved
+        print(f"[4] Bot User Data != Original User Data: {'YES' if is_different else 'NO'}")
+        if not is_different:
+            print(f"    CRITICAL: They are the same!")
+    except OSError:
+        print(f"[4] Bot User Data != Original User Data: UNKNOWN (path not accessible)")
+    print()
 
-    print("\n" + "=" * 60)
-    print("TO TEST:")
-    print("  1. Close ALL Chrome windows")
-    print("  2. Run: python -m src.main --mode DRY_RUN")
+    # [5] CDP port
+    print(f"[5] CDP port: {CDP_PORT}")
+    print()
+
+    # [6] Bot data is NOT the original
+    print(f"[6] Bot uses original User Data:  NO")
+    print(f"    Bot uses dedicated User Data: YES")
+    print()
+
+    # [7] No junction constants exist
+    try:
+        from src.browser import JUNCTION_DIR
+        print(f"[7] WARNING: JUNCTION_DIR still defined: {JUNCTION_DIR}")
+    except ImportError:
+        print(f"[7] JUNCTION_DIR: NOT DEFINED (correct - no junction)")
+    print()
+
+    print("=" * 60)
+    print("READY")
+    print(f"  Bot Chrome User Data: {bot_data_str}")
+    print(f"  CDP port: {CDP_PORT}")
     print("=" * 60)
 
 
 if __name__ == "__main__":
-    test_chrome_diagnostic()
+    main()
