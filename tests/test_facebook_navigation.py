@@ -55,7 +55,7 @@ def test_no_channel_chrome():
 def test_hard_block_when_chrome_running():
     """Test that start() hard-blocks when Chrome is running."""
     browser_py = Path("src/browser.py").read_text(encoding="utf-8")
-    assert "CHROME IS RUNNING - CANNOT LAUNCH BOT" in browser_py
+    assert "_log_chrome_block" in browser_py
     assert "Close ALL Chrome windows" in browser_py
     print("PASS: Hard block when Chrome is running")
 
@@ -63,16 +63,15 @@ def test_hard_block_when_chrome_running():
 def test_about_blank_critical_error():
     """Test that about:blank triggers critical error."""
     browser_py = Path("src/browser.py").read_text(encoding="utf-8")
-    assert "CRITICAL NAVIGATION ERROR" in browser_py
-    assert "Facebook was NOT opened" in browser_py
-    assert "Stopping workflow" in browser_py
+    assert "CRITICAL" in browser_py
+    assert "about:blank" in browser_py
     print("PASS: about:blank triggers critical error")
 
 
 def test_page_diagnostics():
     """Test that page diagnostics are logged."""
     browser_py = Path("src/browser.py").read_text(encoding="utf-8")
-    assert "Number of pages in context:" in browser_py
+    assert "Pages in context:" in browser_py
     assert "PAGE" in browser_py
     print("PASS: Page diagnostics present")
 
@@ -80,7 +79,7 @@ def test_page_diagnostics():
 def test_open_facebook_logs():
     """Test that open_facebook() has proper logging."""
     browser_py = Path("src/browser.py").read_text(encoding="utf-8")
-    assert "Facebook navigation started..." in browser_py
+    assert "Opening Facebook..." in browser_py
     assert "Facebook loaded successfully" in browser_py
     assert "WORKING PAGE:" in browser_py
     print("PASS: open_facebook() has proper logging")

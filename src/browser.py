@@ -6,8 +6,9 @@ Provides persistent Chrome profile using Playwright.
 import asyncio
 import subprocess
 import sys
+import time
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional
 
 from loguru import logger
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page, Playwright
@@ -37,155 +38,157 @@ class BrowserManager:
 
     async def start(self) -> Page:
         """Launch Chrome with persistent profile and return a page."""
-        logger.info("Starting Chrome Profile 2...")
+        t0 = time.time()
+        logger.info("[1] Starting Chrome Profile 2...")
 
-        # Determine Chrome executable path
-        chrome_path = self.chrome_binary or self._find_chrome_executable()
-        if not chrome_path:
-            logger.error("Chrome executable not found. Please set chrome_binary in config.yaml")
-            raise RuntimeError("Chrome executable not found")
-
-        # Determine user data directory
-        user_data = self.user_data_dir or self._get_default_user_data_dir()
-        if not user_data:
-            user_data = str(Path.cwd() / "profile")
-            Path(user_data).mkdir(parents=True, exist_ok=True)
-            logger.warning(f"No user_data_dir specified, using local: {user_data}")
-
-        # Validate paths exist
-        if not Path(chrome_path).exists():
-            raise RuntimeError(f"Chrome executable not found at: {chrome_path}")
-        if not Path(user_data).exists():
-            raise RuntimeError(f"Chrome user data directory not found at: {user_data}")
-
-        profile_path = Path(user_data) / self.profile_name
-        if not profile_path.exists():
-            logger.warning(f"Profile directory not found: {profile_path}")
-            logger.warning("Chrome will create it, but it won't have your Facebook session")
-
-        # HARD BLOCK: Check if Chrome is running
-        # On Windows, Chrome locks the entire User Data directory.
-        # Playwright cannot launch another Chrome with the same User Data dir.
+        # [2] Check Chrome process
         chrome_running = self._is_chrome_running()
-
-        logger.info("Diagnostics:")
-        logger.info(f"  Chrome process detected: {'YES' if chrome_running else 'NO'}")
-        logger.info(f"  User data directory: {user_data}")
-        logger.info(f"  Profile directory: {self.profile_name}")
-        logger.info(f"  Chrome executable: {chrome_path}")
+        logger.info(f"[2] Chrome process: {'RUNNING' if chrome_running else 'NOT RUNNING'}")
 
         if chrome_running:
-            logger.error("")
-            logger.error("=" * 60)
-            logger.error("CHROME IS RUNNING - CANNOT LAUNCH BOT")
-            logger.error("")
-            logger.error("Playwright needs exclusive access to the Chrome")
-            logger.error("User Data directory. Chrome is currently using it.")
-            logger.error("")
-            logger.error("TO FIX THIS:")
-            logger.error("  1. Close ALL Chrome windows")
-            logger.error("  2. Wait 3 seconds")
-            logger.error("  3. Run the bot again")
-            logger.error("")
-            logger.error("After the bot finishes, you can reopen Chrome.")
-            logger.error("")
-            logger.error(f"  User data: {user_data}")
-            logger.error(f"  Profile: {self.profile_name}")
-            logger.error("=" * 60)
+            self._log_chrome_block()
+            raise RuntimeError("Chrome is running. Close ALL Chrome windows and try again.")
+
+        # [3] Check Chrome executable
+        chrome_path = self.chrome_binary or self._find_chrome_executable()
+        if not chrome_path or not Path(chrome_path).exists():
+            logger.error(f"[3] Chrome executable NOT FOUND")
+            raise RuntimeError("Chrome executable not found")
+        logger.info(f"[3] Chrome executable: {chrome_path}")
+
+        # [4] Check User Data directory
+        user_data = self.user_data_dir or self._get_default_user_data_dir()
+        if not user_data or not Path(user_data).exists():
+            logger.error(f"[4] User data directory NOT FOUND: {user_data}")
+            raise RuntimeError(f"Chrome user data directory not found")
+        logger.info(f"[4] User data directory: {user_data}")
+
+        # [5] Check Profile 2
+        profile_path = Path(user_data) / self.profile_name
+        logger.info(f"[5] Profile 2 exists: {'YES' if profile_path.exists() else 'NO'}")
+        if not profile_path.exists():
+            logger.warning("[5] Profile directory not found - Chrome will create it")
+
+        # [6] Check lock files at BOTH levels
+        user_data_locked = self._is_user_data_locked(user_data)
+        profile_locked = self._is_profile_locked(user_data, self.profile_name)
+        logger.info(f"[6] User Data locked: {'YES' if user_data_locked else 'NO'}")
+        logger.info(f"[6] Profile 2 locked: {'YES' if profile_locked else 'NO'}")
+
+        if user_data_locked or profile_locked:
+            self._log_chrome_block()
             raise RuntimeError(
-                "Chrome is running. Close ALL Chrome windows and try again.\n"
-                f"User data: {user_data}\n"
-                f"Profile: {self.profile_name}"
+                "Chrome User Data or Profile 2 is locked. "
+                "Close ALL Chrome windows, wait 5 seconds, and try again."
             )
 
+        # [7] Start Playwright
+        logger.info("[7] Starting Playwright...")
         self._playwright = await async_playwright().start()
+        logger.info("[7] Playwright started")
 
-        # Launch persistent context with the existing Chrome profile
-        self._context = await self._playwright.chromium.launch_persistent_context(
-            user_data_dir=user_data,
-            executable_path=chrome_path,
-            headless=self.headless,
-            slow_mo=self.slow_mo,
-            args=[
-                f"--profile-directory={self.profile_name}",
-                "--disable-blink-features=AutomationControlled",
-                "--no-first-run",
-                "--no-default-browser-check",
-            ],
-            viewport={"width": 1280, "height": 900},
-            locale="uk-UA",
-            timezone_id="Europe/Kyiv",
-        )
+        # [8] Launch persistent context
+        logger.info("[8] Launching persistent Chrome context...")
+        launch_start = time.time()
+        try:
+            self._context = await asyncio.wait_for(
+                self._playwright.chromium.launch_persistent_context(
+                    user_data_dir=user_data,
+                    executable_path=chrome_path,
+                    headless=self.headless,
+                    slow_mo=self.slow_mo,
+                    args=[
+                        f"--profile-directory={self.profile_name}",
+                        "--disable-blink-features=AutomationControlled",
+                        "--no-first-run",
+                        "--no-default-browser-check",
+                    ],
+                    viewport={"width": 1280, "height": 900},
+                    locale="uk-UA",
+                    timezone_id="Europe/Kyiv",
+                ),
+                timeout=20,
+            )
+        except asyncio.TimeoutError:
+            elapsed = time.time() - launch_start
+            logger.error(f"[8] TIMEOUT after {elapsed:.1f}s")
+            logger.error("Chrome persistent context launch timed out.")
+            logger.error("")
+            logger.error("This usually means:")
+            logger.error("  - Chrome User Data is still locked")
+            logger.error("  - Chrome process is residual (kill chrome.exe)")
+            logger.error("  - Profile directory is corrupted")
+            logger.error("")
+            logger.error("Try: close Chrome, wait 5 seconds, run again.")
+            logger.error("If still fails, restart your computer.")
+            raise RuntimeError(
+                f"Chrome launch timed out after {elapsed:.1f}s. "
+                "Close ALL Chrome windows and try again."
+            )
+        except Exception as e:
+            elapsed = time.time() - launch_start
+            logger.error(f"[8] FAILED after {elapsed:.1f}s: {e}")
+            raise
 
-        # Diagnostic: show all pages in context
+        elapsed = time.time() - launch_start
+        logger.info(f"[8] Context created in {elapsed:.1f}s")
+
+        # [9] Check pages in context
         page_count = len(self._context.pages)
-        logger.info(f"Number of pages in context: {page_count}")
+        logger.info(f"[9] Pages in context: {page_count}")
         for idx, pg in enumerate(self._context.pages):
-            logger.info(f"  PAGE {idx}: {pg.url}")
+            logger.info(f"    PAGE {idx}: {pg.url}")
 
-        # Get or create a page
+        # [10] Select working page
         if self._context.pages:
             self._page = self._context.pages[0]
         else:
             self._page = await self._context.new_page()
+        logger.info(f"[10] Working page URL: {self._page.url}")
 
-        logger.info("Browser started successfully")
+        total_time = time.time() - t0
+        logger.info(f"[11] Browser started successfully ({total_time:.1f}s)")
         return self._page
 
     async def open_facebook(self) -> bool:
-        """
-        Navigate to Facebook homepage.
-        This ensures the browser is NOT on about:blank.
-        Returns True if navigation succeeded.
-        """
+        """Navigate to Facebook homepage."""
         if not self._page:
             raise RuntimeError("Browser not started. Call start() first.")
 
-        logger.info("Opening Facebook:")
-        logger.info("  https://www.facebook.com/")
-        logger.info("Facebook navigation started...")
+        logger.info("[12] Opening Facebook...")
+        logger.info("     https://www.facebook.com/")
 
         try:
             before_url = self._page.url
-            logger.info(f"Before navigation URL: {before_url}")
+            logger.info(f"[12] Before navigation: {before_url}")
 
-            await self._page.goto("https://www.facebook.com/", wait_until="domcontentloaded", timeout=30000)
+            await self._page.goto(
+                "https://www.facebook.com/",
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
             await asyncio.sleep(3)
 
             current_url = self._page.url
             page_title = await self._page.title()
 
-            logger.info(f"After navigation URL: {current_url}")
-            logger.info(f"Page title: {page_title}")
+            logger.info(f"[12] After navigation: {current_url}")
+            logger.info(f"[12] Page title: {page_title}")
 
-            # CRITICAL CHECK: about:blank means navigation failed
             if current_url == "about:blank":
-                logger.error("")
-                logger.error("=" * 60)
-                logger.error("CRITICAL NAVIGATION ERROR")
-                logger.error("")
-                logger.error("Expected:")
-                logger.error("  https://www.facebook.com/")
-                logger.error("")
-                logger.error("Actual:")
-                logger.error("  about:blank")
-                logger.error("")
-                logger.error("Facebook was NOT opened.")
-                logger.error("Stopping workflow.")
-                logger.error("=" * 60)
+                logger.error("[12] CRITICAL: Facebook did NOT load. Browser is on about:blank")
                 await self._save_debug_screenshot("navigation_failure")
                 return False
 
             if "facebook.com" in current_url:
-                logger.info("Facebook loaded successfully.")
-                logger.info(f"WORKING PAGE: {current_url}")
+                logger.info(f"[12] Facebook loaded successfully. WORKING PAGE: {current_url}")
                 return True
             else:
-                logger.warning(f"Facebook did not load correctly. Current URL: {current_url}")
+                logger.warning(f"[12] Unexpected URL: {current_url}")
                 await self._save_debug_screenshot("unexpected_url")
                 return False
         except Exception as e:
-            logger.error(f"Failed to open Facebook: {e}")
+            logger.error(f"[12] Failed to open Facebook: {e}")
             await self._save_debug_screenshot("navigation_error")
             return False
 
@@ -202,13 +205,11 @@ class BrowserManager:
         logger.info("Browser stopped")
 
     async def get_page(self) -> Page:
-        """Get the current active page."""
         if not self._page:
             raise RuntimeError("Browser not started. Call start() first.")
         return self._page
 
     async def new_page(self) -> Page:
-        """Open a new page in the browser context."""
         if not self._context:
             raise RuntimeError("Browser not started. Call start() first.")
         self._page = await self._context.new_page()
@@ -222,67 +223,65 @@ class BrowserManager:
         try:
             current_url = self._page.url
             if "facebook.com" not in current_url:
-                logger.info("Not on Facebook yet, navigating...")
+                logger.info("[13] Not on Facebook, navigating...")
                 nav_ok = await self.open_facebook()
                 if not nav_ok:
                     return False
 
-            logger.info("Checking Facebook authentication...")
+            logger.info("[13] Checking Facebook authentication...")
             await asyncio.sleep(2)
 
             current_url = self._page.url
-            logger.info(f"Current URL: {current_url}")
+            logger.info(f"[13] Current URL: {current_url}")
 
             # Check for login form
             login_form = await self._page.query_selector('button[data-testid="royal_login_button"]')
             if login_form:
-                logger.warning("Facebook login form detected - user is NOT logged in")
-                logger.info("Facebook session: NOT AUTHENTICATED")
+                logger.warning("[13] Login form detected - NOT authenticated")
                 return False
 
             # Check for checkpoint
             checkpoint = await self._page.query_selector('[data-testid="checkpoint_title"]')
             if checkpoint:
-                logger.warning("Facebook checkpoint detected - verification required")
-                logger.info("Facebook session: NOT AUTHENTICATED (checkpoint)")
+                logger.warning("[13] Checkpoint detected")
                 return False
 
-            # Check for profile icon or nav bar
+            # Check for profile icon
             logged_in = await self._page.query_selector('[aria-label="Your profile"]') or \
                         await self._page.query_selector('[aria-label="\u041f\u0440\u043e\u0444\u0456\u043b\u044c"]') or \
                         await self._page.query_selector('svg[aria-label="Your profile"]')
 
             if logged_in:
-                logger.info("Facebook session: AUTHENTICATED")
+                logger.info("[13] Facebook session: AUTHENTICATED")
                 return True
 
-            # Additional check: post creation box
+            # Check for post creation box
             post_box = await self._page.query_selector('[aria-label="Create a post"]') or \
                        await self._page.query_selector('[aria-label="\u0421\u0442\u0432\u043e\u0440\u0438\u0442\u0438 \u0434\u043e\u043f\u0438\u0441"]')
             if post_box:
-                logger.info("Facebook session: AUTHENTICATED")
+                logger.info("[13] Facebook session: AUTHENTICATED")
                 return True
 
-            # Check page URL
+            # Check page URL indicators
             if "facebook.com" in current_url and "/login" not in current_url and "/checkpoint" not in current_url:
-                logged_in_indicators = [
+                indicators = [
                     '[aria-label="Home"]',
                     '[aria-label="\u0413\u043e\u043b\u043e\u0432\u043d\u0430"]',
                     '[data-pagelet="Stories"]',
                     '[role="feed"]',
                 ]
-                for indicator in logged_in_indicators:
+                for indicator in indicators:
                     element = await self._page.query_selector(indicator)
                     if element:
-                        logger.info("Facebook session: AUTHENTICATED")
+                        logger.info("[13] Facebook session: AUTHENTICATED")
                         return True
 
-            logger.warning("Could not confirm Facebook login status")
-            logger.info("Facebook session: NOT AUTHENTICATED")
+            logger.warning("[13] Could not confirm login status")
+            logger.info("[13] Facebook session: NOT AUTHENTICATED")
             return False
 
         except Exception as e:
-            logger.error(f"Error checking Facebook auth: {e}")
+            logger.error(f"[13] Error checking auth: {e}")
             return False
 
     async def wait_for_login(self, timeout_minutes: int = 10):
@@ -328,8 +327,56 @@ class BrowserManager:
                 path = f"logs/{name}.png"
                 await self._page.screenshot(path=path, full_page=False)
                 logger.info(f"Debug screenshot saved: {path}")
-        except Exception as e:
-            logger.debug(f"Could not save debug screenshot: {e}")
+        except Exception:
+            pass
+
+    def _log_chrome_block(self):
+        """Log the Chrome block message."""
+        user_data = self.user_data_dir or self._get_default_user_data_dir()
+        logger.error("")
+        logger.error("=" * 60)
+        logger.error("CHROME IS RUNNING OR USER DATA IS LOCKED")
+        logger.error("")
+        logger.error("Playwright needs exclusive access to the Chrome")
+        logger.error("User Data directory. It is currently locked.")
+        logger.error("")
+        logger.error("TO FIX:")
+        logger.error("  1. Close ALL Chrome windows")
+        logger.error("  2. Wait 5 seconds")
+        logger.error("  3. Run the bot again")
+        logger.error("")
+        logger.error(f"  User data: {user_data}")
+        logger.error(f"  Profile: {self.profile_name}")
+        logger.error("=" * 60)
+
+    @staticmethod
+    def _is_user_data_locked(user_data_dir: str) -> bool:
+        """Check if Chrome User Data directory has active locks."""
+        # Check for SingletonLock (strong indicator of active Chrome)
+        singleton = Path(user_data_dir) / "SingletonLock"
+        if singleton.exists():
+            return True
+
+        # Check for non-empty lockfile
+        lockfile = Path(user_data_dir) / "lockfile"
+        if lockfile.exists() and lockfile.stat().st_size > 0:
+            return True
+
+        return False
+
+    @staticmethod
+    def _is_profile_locked(user_data_dir: str, profile_name: str = "Profile 2") -> bool:
+        """Check if a specific Chrome profile is locked."""
+        profile_path = Path(user_data_dir) / profile_name
+        if not profile_path.exists():
+            return False
+
+        for name in ["SingletonLock", "lockfile"]:
+            lock_path = profile_path / name
+            if lock_path.exists():
+                return True
+
+        return False
 
     @staticmethod
     def _is_chrome_running() -> bool:

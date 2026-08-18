@@ -23,23 +23,44 @@ class GroupManager:
         self._groups = []
         path = Path(self.groups_file)
 
+        logger.info(f"Groups file: {path.resolve()}")
+
         if not path.exists():
             logger.warning(f"Groups file not found: {self.groups_file}")
             return
 
+        total_lines = 0
+        comments = 0
+        empty = 0
+        invalid = 0
+
         with open(path, "r", encoding="utf-8") as f:
             for line_num, line in enumerate(f, 1):
+                total_lines += 1
+                raw = line.rstrip("\n")
                 line = line.strip()
-                # Skip empty lines and comments
-                if not line or line.startswith("#"):
+
+                if not line:
+                    empty += 1
+                    continue
+                if line.startswith("#"):
+                    comments += 1
                     continue
 
                 if self._is_valid_facebook_group_url(line):
                     self._groups.append(line)
                 else:
-                    logger.warning(f"Line {line_num}: Invalid Facebook group URL, skipping: {line}")
+                    invalid += 1
+                    logger.warning(f"Line {line_num}: Invalid URL, skipping: {raw}")
 
-        logger.info(f"Loaded {len(self._groups)} group(s) from {self.groups_file}")
+        logger.info(f"Raw lines: {total_lines}")
+        logger.info(f"Comments: {comments}")
+        logger.info(f"Empty lines: {empty}")
+        logger.info(f"Invalid URLs: {invalid}")
+        logger.info(f"Valid group URLs: {len(self._groups)}")
+
+        for idx, url in enumerate(self._groups, 1):
+            logger.info(f"  [{idx}] {url}")
 
     def _is_valid_facebook_group_url(self, url: str) -> bool:
         """Validate that a URL is a valid Facebook group URL."""
