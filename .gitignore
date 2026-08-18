@@ -9,6 +9,7 @@ cookies/
 sessions/
 auth_data/
 chrome_profile/
+chrome_user_data/
 *.sqlite
 *.db
 

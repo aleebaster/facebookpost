@@ -1,22 +1,22 @@
 """
 Browser management module.
 
-Launches system Google Chrome with Profile 2 via Chrome DevTools Protocol (CDP).
+Chrome 151 blocks remote debugging (both --remote-debugging-port and
+--remote-debugging-pipe) when used with the DEFAULT User Data directory.
+Error: "DevTools remote debugging requires a non-default data directory."
 
-Chrome 151 ignores --remote-debugging-port when used with the full User Data
-directory. The solution is to copy Profile 2 to a dedicated directory and
-launch Chrome with that directory. The Facebook session (cookies) is preserved
-because Chrome cookies are DPAPI-encrypted and tied to the Chrome executable,
-not the directory path.
+Solution: Create a directory junction from chrome_user_data -> original User Data.
+Chrome sees it as "non-default" and allows remote debugging.
+The junction points to the EXACT SAME files, so the original Profile 2
+and Facebook session are preserved.
 
 Architecture:
-  Python -> Playwright CDP client -> System Google Chrome -> copied Profile 2 -> Facebook session
+  Python -> Playwright CDP client -> System Google Chrome -> junction -> original User Data/Profile 2
 
 IMPORTANT: Chrome must be CLOSED before running the bot.
 """
 
 import asyncio
-import shutil
 import subprocess
 import sys
 import time
@@ -30,8 +30,8 @@ from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 # Chrome debugging port
 CDP_PORT = 9222
 
-# Dedicated directory for the bot's Chrome profile
-BOT_PROFILE_DIR = "chrome_profile"
+# Junction directory name (points to original User Data)
+JUNCTION_DIR = "chrome_user_data"
 
 
 class BrowserManager:
@@ -59,14 +59,14 @@ class BrowserManager:
 
     async def start(self) -> Page:
         """
-        Launch system Chrome with Profile 2 and connect via CDP.
+        Launch system Chrome with Profile 2 via CDP.
 
         Steps:
           [1] Validate paths
-          [2] Copy Profile 2 to dedicated directory
-          [3] Launch Chrome with dedicated directory + CDP
+          [2] Create junction to original User Data
+          [3] Launch Chrome with junction + CDP
           [4] Connect Playwright via CDP
-          [5] Create ONE working page
+          [5] Select working page
           [6] Navigate to Facebook
         """
         t0 = time.time()
@@ -81,8 +81,8 @@ class BrowserManager:
         logger.info("=" * 60)
         logger.info("Browser: SYSTEM GOOGLE CHROME")
         logger.info(f"  Executable:     {chrome_path}")
-        logger.info(f"  Source User:    {user_data}")
-        logger.info(f"  Source Profile: {profile_path}")
+        logger.info(f"  Original User:  {user_data}")
+        logger.info(f"  Original Profile: {profile_path}")
         logger.info(f"  CDP port:       {CDP_PORT}")
         logger.info("=" * 60)
 
@@ -95,51 +95,48 @@ class BrowserManager:
             raise RuntimeError(f"Profile not found: {profile_path}")
         logger.info("[1] All paths validated [OK]")
 
-        # -- [2] Copy Profile 2 to dedicated directory --
-        bot_profile = Path(BOT_PROFILE_DIR)
-        logger.info(f"[2] Copying Profile 2 to {bot_profile.resolve()}...")
+        # -- [2] Create junction to original User Data --
+        junction_path = Path(JUNCTION_DIR).resolve()
+        logger.info(f"[2] Creating junction to original User Data...")
+        logger.info(f"    Junction: {junction_path}")
+        logger.info(f"    Target:   {user_data}")
 
-        # Remove old copy if exists
-        if bot_profile.exists():
-            shutil.rmtree(bot_profile, ignore_errors=True)
+        # Remove old junction if exists
+        if junction_path.exists():
+            try:
+                junction_path.rmdir()
+            except Exception:
+                pass
 
-        bot_profile.mkdir(parents=True, exist_ok=True)
+        # Create junction using Windows mklink /J
+        result = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(junction_path), user_data],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
 
-        # Copy profile directory using copytree for complete copy
-        src_profile = profile_path
-        dst_profile = bot_profile / self.profile_name
-
-        try:
-            shutil.copytree(src_profile, dst_profile, dirs_exist_ok=True)
-            file_count = sum(1 for _ in dst_profile.rglob("*") if _.is_file())
-            logger.info(f"[2] Copied {file_count} files from Profile 2")
-        except Exception as e:
-            logger.warning(f"[2] copytree failed ({e}), falling back to cp -r")
-            subprocess.run(
-                ["cp", "-r", str(src_profile), str(bot_profile)],
-                capture_output=True, timeout=60,
+        if not junction_path.exists():
+            raise RuntimeError(
+                f"Failed to create junction from {junction_path} to {user_data}\n"
+                f"cmd output: {result.stdout} {result.stderr}"
             )
-            file_count = sum(1 for _ in dst_profile.rglob("*") if _.is_file())
-            logger.info(f"[2] Copied {file_count} files via cp -r")
 
-        # Also copy Local State (needed for cookie decryption)
-        local_state = Path(user_data) / "Local State"
-        if local_state.exists():
-            shutil.copy2(local_state, bot_profile / "Local State")
-            logger.info("[2] Copied Local State")
+        # Verify junction works
+        entries = list(junction_path.iterdir())
+        logger.info(f"[2] Junction created: {len(entries)} entries")
+        logger.info(f"[2] Profile 2 accessible: {(junction_path / self.profile_name).exists()}")
 
-        logger.info(f"[2] Dedicated profile ready: {dst_profile}")
-
-        # -- [3] Launch Chrome with dedicated directory --
+        # -- [3] Launch Chrome with junction --
         logger.info("[3] Launching system Chrome...")
         logger.info(f"    --remote-debugging-port={CDP_PORT}")
-        logger.info(f"    --user-data-dir={bot_profile.resolve()}")
+        logger.info(f"    --user-data-dir={junction_path}")
         logger.info(f"    --profile-directory={self.profile_name}")
 
         chrome_args = [
             chrome_path,
             f"--remote-debugging-port={CDP_PORT}",
-            f"--user-data-dir={str(bot_profile.resolve())}",
+            f"--user-data-dir={junction_path}",
             f"--profile-directory={self.profile_name}",
             "--no-first-run",
             "--no-default-browser-check",
@@ -161,8 +158,7 @@ class BrowserManager:
         port_ready = await self._wait_for_port(CDP_PORT, timeout=20)
         if not port_ready:
             raise RuntimeError(
-                f"Chrome did not open debugging port {CDP_PORT} within 20 seconds.\n"
-                "Chrome may have crashed."
+                f"Chrome did not open debugging port {CDP_PORT} within 20 seconds."
             )
         logger.info(f"[4] Debugging port {CDP_PORT} ready [OK]")
 
@@ -199,10 +195,9 @@ class BrowserManager:
         logger.info("[7] Selecting working page...")
         if self._context.pages:
             self._page = self._context.pages[0]
-            logger.info(f"[7] Using existing page: {self._page.url}")
         else:
             self._page = await self._context.new_page()
-            logger.info(f"[7] Created new page: {self._page.url}")
+        logger.info(f"[7] Working page: {self._page.url}")
 
         total_time = time.time() - t0
         logger.info(f"[7] Browser connected ({total_time:.1f}s)")

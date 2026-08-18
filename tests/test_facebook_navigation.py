@@ -59,13 +59,14 @@ class TestBrowserConfig(unittest.TestCase):
         self.assertNotIn("AutomationControlled", source)
         self.assertNotIn("disable-blink-features", source)
 
-    def test_copies_profile_to_dedicated_dir(self):
-        """Bot must copy Profile 2 to a dedicated directory (not use User Data directly)."""
+    def test_uses_junction_not_copy(self):
+        """Bot must use junction, not copy."""
         from src.browser import BrowserManager
         import inspect
         source = inspect.getsource(BrowserManager.start)
-        self.assertIn("copy", source.lower(), "Must copy Profile 2")
-        self.assertIn("BOT_PROFILE_DIR", source, "Must use dedicated profile dir")
+        self.assertIn("mklink", source, "Must use mklink /J for junction")
+        self.assertNotIn("shutil.copytree", source, "Must NOT copy profile")
+        self.assertNotIn("shutil.copy2", source, "Must NOT copy profile")
 
     def test_no_is_chrome_running(self):
         """_is_chrome_running must NOT exist."""
