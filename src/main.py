@@ -79,6 +79,12 @@ async def run_bot(mode: str = "DRY_RUN", config_path: str = "config.yaml"):
     )
 
     # Show media summary
+    photos_dir = Path(media_config.get("photos_dir", "data/photos"))
+    videos_dir = Path(media_config.get("videos_dir", "data/videos"))
+    logger.info(f"Photos directory:")
+    logger.info(f"  {photos_dir.resolve()}")
+    logger.info(f"Videos directory:")
+    logger.info(f"  {videos_dir.resolve()}")
     photo_count = len(media_manager.photos)
     video_count = len(media_manager.videos)
     logger.info(f"Photos found: {photo_count}")

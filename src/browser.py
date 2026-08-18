@@ -7,7 +7,7 @@ import asyncio
 import subprocess
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 from loguru import logger
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page, Playwright
@@ -63,51 +63,89 @@ class BrowserManager:
             logger.warning(f"Profile directory not found: {profile_path}")
             logger.warning("Chrome will create it, but it won't have your Facebook session")
 
-        # Check if Chrome is already running with this profile
-        if self._is_chrome_running():
+        # Diagnostic logging
+        chrome_running = self._is_chrome_running()
+        profile_locked = self._is_profile_locked(user_data, self.profile_name)
+
+        logger.info("Diagnostics:")
+        logger.info(f"  Chrome process detected: {'YES' if chrome_running else 'NO'}")
+        logger.info(f"  Profile 2 lock detected: {'YES' if profile_locked else 'NO'}")
+        logger.info(f"  User data directory: {user_data}")
+        logger.info(f"  Profile directory: {self.profile_name}")
+        logger.info(f"  Chrome executable: {chrome_path}")
+
+        # Only block if Profile 2 is specifically locked by a lock file
+        if profile_locked:
             logger.error("=" * 60)
-            logger.error("Chrome is currently running!")
+            logger.error("Chrome Profile 2 is LOCKED by another Chrome instance!")
             logger.error("")
             logger.error("Playwright cannot use a Chrome profile that is already open.")
             logger.error("")
             logger.error("To fix this:")
-            logger.error("  1. Close ALL Chrome windows")
+            logger.error("  1. Close ALL Chrome windows that use Profile 2")
             logger.error("  2. Wait a few seconds")
             logger.error("  3. Run the bot again")
             logger.error("")
-            logger.error(f"Profile: {self.profile_name}")
-            logger.error(f"User data: {user_data}")
+            logger.error(f"  Profile: {self.profile_name}")
+            logger.error(f"  User data: {user_data}")
             logger.error("=" * 60)
             raise RuntimeError(
-                f"Chrome is running. Close all Chrome windows and try again."
+                f"Chrome Profile 2 is locked. Close Chrome windows using this profile and try again."
             )
 
-        # Debug logging
-        logger.info("Chrome user data directory:")
-        logger.info(f"  {user_data}")
-        logger.info("Chrome profile:")
-        logger.info(f"  {self.profile_name}")
-        logger.info("Chrome executable:")
-        logger.info(f"  {chrome_path}")
+        if chrome_running:
+            logger.info("Chrome is running. Attempting to launch with Profile 2...")
+            logger.info("NOTE: Chrome locks the entire User Data directory.")
+            logger.info("If launch fails, close ALL Chrome windows and try again.")
 
         self._playwright = await async_playwright().start()
 
         # Launch persistent context with the existing Chrome profile
-        self._context = await self._playwright.chromium.launch_persistent_context(
-            user_data_dir=user_data,
-            executable_path=chrome_path,
-            headless=self.headless,
-            slow_mo=self.slow_mo,
-            args=[
-                f"--profile-directory={self.profile_name}",
-                "--disable-blink-features=AutomationControlled",
-                "--no-first-run",
-                "--no-default-browser-check",
-            ],
-            viewport={"width": 1280, "height": 900},
-            locale="uk-UA",
-            timezone_id="Europe/Kyiv",
-        )
+        try:
+            self._context = await self._playwright.chromium.launch_persistent_context(
+                user_data_dir=user_data,
+                executable_path=chrome_path,
+                headless=self.headless,
+                slow_mo=self.slow_mo,
+                args=[
+                    f"--profile-directory={self.profile_name}",
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                ],
+                viewport={"width": 1280, "height": 900},
+                locale="uk-UA",
+                timezone_id="Europe/Kyiv",
+            )
+        except Exception as e:
+            error_msg = str(e).lower()
+            if "target page, context or browser has been closed" in error_msg or \
+               "profile" in error_msg or \
+               "already" in error_msg or \
+               "locked" in error_msg or \
+               "in use" in error_msg:
+                logger.error("=" * 60)
+                logger.error("Chrome profile is LOCKED by another Chrome instance!")
+                logger.error("")
+                logger.error("Chrome locked the User Data directory, preventing")
+                logger.error("Playwright from launching a new Chrome instance.")
+                logger.error("")
+                logger.error("To fix this:")
+                logger.error("  1. Close ALL Chrome windows")
+                logger.error("  2. Wait a few seconds")
+                logger.error("  3. Run the bot again")
+                logger.error("")
+                logger.error(f"  User data: {user_data}")
+                logger.error(f"  Profile: {self.profile_name}")
+                logger.error("")
+                logger.error("Original error:")
+                logger.error(f"  {e}")
+                logger.error("=" * 60)
+                raise RuntimeError(
+                    f"Chrome profile is locked. Close ALL Chrome windows and try again."
+                ) from e
+            else:
+                raise
 
         # Get or create a page
         if self._context.pages:
@@ -122,17 +160,29 @@ class BrowserManager:
         """
         Navigate to Facebook homepage.
         This ensures the browser is NOT on about:blank.
+        Returns True if navigation succeeded.
         """
         if not self._page:
             raise RuntimeError("Browser not started. Call start() first.")
 
         logger.info("Opening Facebook...")
         try:
+            before_url = self._page.url
+            logger.info(f"Before navigation URL: {before_url}")
+
             await self._page.goto("https://www.facebook.com/", wait_until="domcontentloaded", timeout=30000)
-            await asyncio.sleep(2)
+            await asyncio.sleep(3)
 
             current_url = self._page.url
-            logger.info(f"Current URL: {current_url}")
+            page_title = await self._page.title()
+
+            logger.info(f"After navigation URL: {current_url}")
+            logger.info(f"Page title: {page_title}")
+
+            if current_url == "about:blank":
+                logger.error("Navigation failed - browser is on about:blank")
+                await self._save_debug_screenshot("navigation_failure")
+                return False
 
             if "facebook.com" in current_url:
                 logger.info("Facebook opened successfully")
@@ -142,6 +192,7 @@ class BrowserManager:
                 return False
         except Exception as e:
             logger.error(f"Failed to open Facebook: {e}")
+            await self._save_debug_screenshot("navigation_error")
             return False
 
     async def stop(self):
@@ -175,7 +226,6 @@ class BrowserManager:
             return False
 
         try:
-            # Make sure we are on Facebook first
             current_url = self._page.url
             if "facebook.com" not in current_url:
                 logger.info("Not on Facebook yet, navigating...")
@@ -276,9 +326,20 @@ class BrowserManager:
         logger.error(f"Login timeout after {timeout_minutes} minutes")
         return False
 
+    async def _save_debug_screenshot(self, name: str = "debug"):
+        """Save a screenshot for debugging purposes."""
+        try:
+            if self._page:
+                Path("logs").mkdir(parents=True, exist_ok=True)
+                path = f"logs/{name}.png"
+                await self._page.screenshot(path=path, full_page=False)
+                logger.info(f"Debug screenshot saved: {path}")
+        except Exception as e:
+            logger.debug(f"Could not save debug screenshot: {e}")
+
     @staticmethod
     def _is_chrome_running() -> bool:
-        """Check if Chrome is currently running on the system."""
+        """Check if any Chrome process is running on the system."""
         try:
             if sys.platform == "win32":
                 result = subprocess.run(
@@ -294,6 +355,29 @@ class BrowserManager:
                 return result.returncode == 0
         except Exception:
             return False
+
+    @staticmethod
+    def _is_profile_locked(user_data_dir: str, profile_name: str = "Profile 2") -> bool:
+        """
+        Check if a specific Chrome profile is locked.
+        Looks for lock files in the profile directory.
+        """
+        profile_path = Path(user_data_dir) / profile_name
+        if not profile_path.exists():
+            return False
+
+        lock_files = ["SingletonLock", "lockfile", "LOCK"]
+
+        for lock_name in lock_files:
+            lock_path = profile_path / lock_name
+            if lock_path.exists():
+                # LOCK file exists but is 0 bytes = not an active lock
+                if lock_name == "LOCK" and lock_path.stat().st_size == 0:
+                    continue
+                logger.debug(f"Lock file found: {lock_path}")
+                return True
+
+        return False
 
     @staticmethod
     def _find_chrome_executable() -> str:
