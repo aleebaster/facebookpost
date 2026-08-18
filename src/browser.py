@@ -12,7 +12,6 @@ The bot launches its own Chrome instance with the user's profile.
 """
 
 import asyncio
-import json
 import subprocess
 import sys
 import time
@@ -55,12 +54,12 @@ class BrowserManager:
         Launch system Chrome with Profile 2 and connect via CDP.
 
         Steps:
-          [1] Resolve paths (executable, user_data_dir, profile)
-          [2] Validate paths exist
-          [3] Check Chrome is NOT running (User Data would be locked)
-          [4] Launch Chrome with --remote-debugging-port
-          [5] Connect Playwright via CDP
-          [6] Find and select the correct working page
+          [1] Resolve and validate paths
+          [2] Check Chrome is NOT running
+          [3] Launch Chrome with --remote-debugging-port
+          [4] Connect Playwright via CDP
+          [5] Close all default about:blank pages
+          [6] Create ONE working page
           [7] Navigate to Facebook
           [8] Verify Facebook loaded
         """
@@ -84,19 +83,15 @@ class BrowserManager:
 
         # -- [2] Validate paths --
         logger.info("[1] Validating paths...")
-
         if not Path(chrome_path).exists():
             raise RuntimeError(
                 f"Chrome executable not found: {chrome_path}\n"
                 "Install Google Chrome or set browser.chrome_binary in config.yaml"
             )
-
         if not Path(user_data).exists():
             raise RuntimeError(f"User Data directory not found: {user_data}")
-
         if not profile_path.exists():
             raise RuntimeError(f"Profile not found: {profile_path}")
-
         logger.info("[1] All paths validated [OK]")
 
         # -- [3] Check Chrome is NOT running --
@@ -116,14 +111,12 @@ class BrowserManager:
             )
 
         # -- [4] Launch Chrome with remote debugging --
-        # DO NOT pass any URL (not even about:blank) as initial page.
-        # Chrome will open its default new tab page.
-        # We will navigate to Facebook explicitly after connecting.
+        # NO initial URL — Chrome opens its default new tab.
+        # We will close all tabs and create a fresh one for Facebook.
         logger.info("[3] Launching system Chrome...")
         logger.info(f"    chrome.exe --remote-debugging-port={CDP_PORT}")
         logger.info(f"    --user-data-dir={user_data}")
         logger.info(f"    --profile-directory={self.profile_name}")
-        logger.info("    (no initial URL — will navigate to Facebook after connecting)")
 
         chrome_args = [
             chrome_path,
@@ -132,10 +125,7 @@ class BrowserManager:
             f"--profile-directory={self.profile_name}",
             "--no-first-run",
             "--no-default-browser-check",
-            "--disable-blink-features=AutomationControlled",
         ]
-        # DO NOT add "about:blank" or any URL here.
-        # Chrome opens its default new tab. We navigate to Facebook after connecting.
 
         try:
             self._chrome_process = subprocess.Popen(
@@ -174,51 +164,55 @@ class BrowserManager:
 
         logger.info("[5] Connected to Chrome via CDP [OK]")
 
-        # -- [6] List ALL pages across ALL contexts --
-        logger.info("[6] Listing all pages...")
-        all_pages = []
+        # -- [6] List ALL contexts and pages --
+        logger.info("[6] Listing all contexts and pages...")
         for ctx_idx, ctx in enumerate(self._browser.contexts):
+            logger.info(f"    Context {ctx_idx}: {len(ctx.pages)} page(s)")
             for pg_idx, pg in enumerate(ctx.pages):
-                all_pages.append((ctx_idx, pg_idx, pg))
-                logger.info(f"    Context {ctx_idx}, Page {pg_idx}: {pg.url}")
+                logger.info(f"      Page {pg_idx}: {pg.url}")
 
-        if not all_pages:
-            logger.info("[6] No pages found. Creating new page...")
-            self._context = self._browser.contexts[0] if self._browser.contexts else await self._browser.new_context()
-            self._page = await self._context.new_page()
+        # Get the default context (first one)
+        if not self._browser.contexts:
+            self._context = await self._browser.new_context()
         else:
-            # Select the first page as working page
-            ctx_idx, pg_idx, self._page = all_pages[0]
-            self._context = self._browser.contexts[ctx_idx]
+            self._context = self._browser.contexts[0]
 
-        logger.info(f"[6] Selected working page: Context {ctx_idx}, Page {pg_idx}")
-        logger.info(f"    URL: {self._page.url}")
+        logger.info(f"[6] Using context with {len(self._context.pages)} page(s)")
+
+        # -- [7] Close ALL existing pages (they are about:blank from Chrome startup) --
+        logger.info("[7] Closing default pages...")
+        existing_pages = list(self._context.pages)
+        for pg in existing_pages:
+            try:
+                await pg.close()
+                logger.info(f"    Closed: {pg.url}")
+            except Exception as e:
+                logger.debug(f"    Could not close page: {e}")
+
+        # -- [8] Create ONE fresh working page --
+        logger.info("[8] Creating fresh working page...")
+        self._page = await self._context.new_page()
+
+        working_url = self._page.url
+        logger.info(f"[8] Working page created: {working_url}")
 
         total_time = time.time() - t0
-        logger.info(f"[6] Browser connected ({total_time:.1f}s)")
+        logger.info(f"[8] Browser connected ({total_time:.1f}s)")
 
         return self._page
 
     async def open_facebook(self) -> bool:
         """
         Navigate to Facebook homepage and verify it loads.
-
-        Uses multiple verification methods:
-        1. page.url after navigation
-        2. window.location.href via JavaScript evaluation
-        3. Page title check
-        4. Screenshot for visual confirmation
         """
         if not self._page:
             raise RuntimeError("Browser not started. Call start() first.")
 
-        logger.info("[7] Opening Facebook:")
+        logger.info("[9] Opening Facebook:")
         logger.info("     https://www.facebook.com/")
+        logger.info(f"[9] URL before navigation: {self._page.url}")
 
         try:
-            before_url = self._page.url
-            logger.info(f"[7] URL before navigation: {before_url}")
-
             # Navigate to Facebook
             await self._page.goto(
                 "https://www.facebook.com/",
@@ -226,42 +220,42 @@ class BrowserManager:
                 timeout=60000,
             )
 
-            # Wait for page to fully render
+            # Wait for network to settle
             try:
                 await self._page.wait_for_load_state("networkidle", timeout=15000)
             except Exception:
-                logger.info("[7] networkidle timeout — proceeding with current state")
+                logger.info("[9] networkidle timeout — proceeding")
 
             # Extra wait for dynamic content
             await asyncio.sleep(5)
 
-            # -- Verify navigation --
+            # -- Verify with multiple methods --
             page_url = self._page.url
             doc_url = await self._page.evaluate("window.location.href")
             page_title = await self._page.title()
 
-            logger.info("[7] Verification results:")
+            logger.info("[9] Navigation verification:")
             logger.info(f"     page.url:          {page_url}")
             logger.info(f"     document.location: {doc_url}")
             logger.info(f"     page title:        {page_title}")
 
-            # Check all pages in context after navigation
-            logger.info("[7] All pages after Facebook navigation:")
+            # List ALL pages after navigation
+            logger.info("[9] All pages after navigation:")
             for idx, pg in enumerate(self._context.pages):
                 logger.info(f"     [{idx}] {pg.url}")
 
-            # Take screenshot for visual confirmation
+            # Take screenshot
             screenshot_path = "logs/facebook_after_navigation.png"
             try:
                 Path("logs").mkdir(exist_ok=True)
                 await self._page.screenshot(path=screenshot_path)
-                logger.info(f"[7] Screenshot saved: {screenshot_path}")
+                logger.info(f"[9] Screenshot: {screenshot_path}")
             except Exception as e:
-                logger.warning(f"[7] Screenshot failed: {e}")
+                logger.warning(f"[9] Screenshot failed: {e}")
 
             # -- Critical checks --
             if page_url == "about:blank" and doc_url == "about:blank":
-                logger.error("[7] CRITICAL NAVIGATION ERROR:")
+                logger.error("[9] CRITICAL NAVIGATION ERROR:")
                 logger.error("     Expected: https://www.facebook.com/")
                 logger.error(f"     page.url: {page_url}")
                 logger.error(f"     document.location.href: {doc_url}")
@@ -269,16 +263,15 @@ class BrowserManager:
                 return False
 
             if "facebook.com" in page_url or "facebook.com" in doc_url:
-                logger.info("[7] Facebook loaded successfully.")
+                logger.info("[9] Facebook loaded successfully.")
                 logger.info(f"     WORKING PAGE: {page_url}")
                 return True
             else:
-                logger.warning(f"[7] Unexpected URL: {page_url}")
-                logger.warning(f"     Document URL: {doc_url}")
+                logger.warning(f"[9] Unexpected URL: {page_url}")
                 return False
 
         except Exception as e:
-            logger.error(f"[7] Failed to open Facebook: {e}")
+            logger.error(f"[9] Failed to open Facebook: {e}")
             return False
 
     async def stop(self):
@@ -322,20 +315,20 @@ class BrowserManager:
         try:
             current_url = self._page.url
             if "facebook.com" not in current_url:
-                logger.info("[8] Not on Facebook, navigating...")
+                logger.info("[10] Not on Facebook, navigating...")
                 nav_ok = await self.open_facebook()
                 if not nav_ok:
                     return False
 
-            logger.info("[8] Checking Facebook authentication...")
+            logger.info("[10] Checking Facebook authentication...")
             await asyncio.sleep(2)
 
             current_url = self._page.url
             doc_url = await self._page.evaluate("window.location.href")
-            logger.info(f"[8] page.url: {current_url}")
-            logger.info(f"[8] document.location.href: {doc_url}")
+            logger.info(f"[10] page.url: {current_url}")
+            logger.info(f"[10] document.location.href: {doc_url}")
 
-            # Check for login form indicators
+            # Check for login form
             login_selectors = [
                 'button[data-testid="royal_login_button"]',
                 '#login_form',
@@ -347,7 +340,7 @@ class BrowserManager:
                 try:
                     el = await self._page.query_selector(sel)
                     if el:
-                        logger.warning("[8] Login form detected - NOT authenticated")
+                        logger.warning("[10] Login form detected - NOT authenticated")
                         return False
                 except Exception:
                     continue
@@ -361,7 +354,7 @@ class BrowserManager:
                 try:
                     el = await self._page.query_selector(sel)
                     if el:
-                        logger.warning("[8] Checkpoint detected")
+                        logger.warning("[10] Checkpoint detected")
                         return False
                 except Exception:
                     continue
@@ -382,7 +375,7 @@ class BrowserManager:
                 try:
                     el = await self._page.query_selector(sel)
                     if el:
-                        logger.info("[8] Facebook session: AUTHENTICATED")
+                        logger.info("[10] Facebook session: AUTHENTICATED")
                         return True
                 except Exception:
                     continue
@@ -394,15 +387,15 @@ class BrowserManager:
                 and "/login" not in url_to_check
                 and "/checkpoint" not in url_to_check
             ):
-                logger.info("[8] Facebook session: AUTHENTICATED (URL-based check)")
+                logger.info("[10] Facebook session: AUTHENTICATED (URL-based)")
                 return True
 
-            logger.warning("[8] Could not confirm login status")
-            logger.info("[8] Facebook session: NOT AUTHENTICATED")
+            logger.warning("[10] Could not confirm login status")
+            logger.info("[10] Facebook session: NOT AUTHENTICATED")
             return False
 
         except Exception as e:
-            logger.error(f"[8] Error checking auth: {e}")
+            logger.error(f"[10] Error checking auth: {e}")
             return False
 
     async def wait_for_login(self, timeout_minutes: int = 10):
