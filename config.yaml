@@ -1,0 +1,111 @@
+# Facebook Posting Bot Configuration
+# ================================
+
+# Operating mode
+# Options: DRY_RUN | MANUAL_APPROVAL | AUTO
+mode: DRY_RUN
+
+# Browser configuration
+browser:
+  # Path to Chrome binary (empty = system default)
+  chrome_binary: ""
+  
+  # Path to Chrome user data directory (empty = use system default profile)
+  # On Windows typically: C:\Users\<username>\AppData\Local\Google\Chrome\User Data
+  user_data_dir: ""
+  
+  # Chrome profile name to use
+  profile_name: "Default"
+  
+  # Headless mode (RECOMMENDED: false — you need to see and authorize)
+  headless: false
+  
+  # Slow down actions by this much (ms) — helps with stability
+  slow_mo: 100
+
+# Timing configuration (seconds)
+timing:
+  # Pause between publishing to different groups
+  min_post_interval: 180
+  max_post_interval: 420
+  
+  # Pause after page loads
+  page_load_delay: 5
+  
+  # Pause before interacting with form elements
+  form_delay: 3
+  
+  # Pause after submitting
+  submit_delay: 5
+  
+  # Pause between scrolls
+  scroll_delay: 2
+  
+  # Max consecutive failures before stopping
+  max_consecutive_failures: 3
+
+# Content generation
+content:
+  # Number of text variations to generate before publishing
+  number_of_variations: 6
+  
+  # Property listing template (facts that must NOT change)
+  property:
+    location: "Бурштин, Івано-Франківська область"
+    type: "половина будинку"
+    price: "$25 000"
+    area: "59 м²"
+    land: "9 сотих"
+    rooms: "2 кімнати"
+    features:
+      - "велика кладовка, яку можна переобладнати під кімнату"
+      - "кухня, ванна, туалет"
+      - "підвал + вихід на горище"
+      - "сарай, город, місце під гараж"
+    condition: "будинок під ремонт"
+    heating: "центральне опалення відключене, газова труба біля будинку"
+    contact:
+      name: "Олег"
+      phone: "+380 50 725 95 19"
+
+# Media configuration
+media:
+  # Path to file containing photo URLs (one per line)
+  photos_file: "data/photos.txt"
+  
+  # Path to file containing video URLs (one per line)
+  videos_file: "data/videos.txt"
+  
+  # Max file size in MB
+  max_photo_size: 10
+  max_video_size: 100
+  
+  # Allowed photo formats
+  allowed_photo_formats:
+    - ".jpg"
+    - ".jpeg"
+    - ".png"
+    - ".webp"
+  
+  # Allowed video formats
+  allowed_video_formats:
+    - ".mp4"
+    - ".mov"
+    - ".avi"
+
+# Database
+database:
+  # SQLite database path
+  path: "data/publications.db"
+
+# Logging
+logging:
+  level: "INFO"
+  file: "logs/bot.log"
+  rotation: "10 MB"
+  retention: "30 days"
+
+# Groups
+groups:
+  # Path to file containing group URLs (one per line)
+  file: "data/groups.txt"

@@ -1,0 +1,6 @@
+# Facebook Groups List
+# Add one group URL per line
+# Lines starting with # are comments
+# Example:
+# https://www.facebook.com/groups/123456789
+# https://www.facebook.com/groups/groupname

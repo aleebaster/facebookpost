@@ -1,0 +1,234 @@
+"""
+Browser management module.
+Provides persistent Chrome profile using Playwright.
+"""
+
+import asyncio
+import sys
+from pathlib import Path
+from typing import Optional
+
+from loguru import logger
+from playwright.async_api import async_playwright, Browser, BrowserContext, Page, Playwright
+
+
+class BrowserManager:
+    """Manages Chrome browser with persistent profile for Facebook sessions."""
+
+    def __init__(
+        self,
+        user_data_dir: str = "",
+        profile_name: str = "Default",
+        chrome_binary: str = "",
+        headless: bool = False,
+        slow_mo: int = 100,
+    ):
+        self.user_data_dir = user_data_dir
+        self.profile_name = profile_name
+        self.chrome_binary = chrome_binary
+        self.headless = headless
+        self.slow_mo = slow_mo
+
+        self._playwright: Optional[Playwright] = None
+        self._browser: Optional[Browser] = None
+        self._context: Optional[BrowserContext] = None
+        self._page: Optional[Page] = None
+
+    async def start(self) -> Page:
+        """Launch Chrome with persistent profile and return a page."""
+        logger.info("Starting browser with persistent profile...")
+
+        self._playwright = await async_playwright().start()
+
+        # Determine Chrome executable path
+        chrome_path = self.chrome_binary or self._find_chrome_executable()
+        if not chrome_path:
+            logger.error("Chrome executable not found. Please set chrome_binary in config.yaml")
+            raise RuntimeError("Chrome executable not found")
+
+        logger.info(f"Using Chrome: {chrome_path}")
+
+        # Determine user data directory
+        user_data = self.user_data_dir or self._get_default_user_data_dir()
+        if not user_data:
+            # Use a local profile directory if nothing specified
+            user_data = str(Path.cwd() / "profile")
+            Path(user_data).mkdir(parents=True, exist_ok=True)
+            logger.warning(f"No user_data_dir specified, using local: {user_data}")
+
+        # Launch persistent context (keeps cookies, sessions between runs)
+        self._context = await self._playwright.chromium.launch_persistent_context(
+            user_data_dir=user_data,
+            executable_path=chrome_path,
+            headless=self.headless,
+            slow_mo=self.slow_mo,
+            channel="chrome",  # Use installed Chrome, not Chromium
+            args=[
+                f"--profile-directory={self.profile_name}",
+                "--disable-blink-features=AutomationControlled",
+                "--no-first-run",
+            ],
+            viewport={"width": 1280, "height": 900},
+            locale="uk-UA",
+            timezone_id="Europe/Kyiv",
+        )
+
+        # Get or create a page
+        if self._context.pages:
+            self._page = self._context.pages[0]
+        else:
+            self._page = await self._context.new_page()
+
+        logger.info("Browser started successfully")
+        return self._page
+
+    async def stop(self):
+        """Close browser and clean up."""
+        logger.info("Stopping browser...")
+        if self._context:
+            await self._context.close()
+            self._context = None
+        if self._playwright:
+            await self._playwright.stop()
+            self._playwright = None
+        self._page = None
+        logger.info("Browser stopped")
+
+    async def get_page(self) -> Page:
+        """Get the current active page."""
+        if not self._page:
+            raise RuntimeError("Browser not started. Call start() first.")
+        return self._page
+
+    async def new_page(self) -> Page:
+        """Open a new page in the browser context."""
+        if not self._context:
+            raise RuntimeError("Browser not started. Call start() first.")
+        self._page = await self._context.new_page()
+        return self._page
+
+    async def check_facebook_auth(self) -> bool:
+        """Check if the user is logged into Facebook."""
+        if not self._page:
+            return False
+
+        try:
+            await self._page.goto("https://www.facebook.com/", wait_until="domcontentloaded")
+            await asyncio.sleep(3)
+
+            # Check for login form — if present, user is NOT logged in
+            login_form = await self._page.query_selector('button[data-testid="royal_login_button"]')
+            if login_form:
+                logger.warning("Facebook login form detected — user is NOT logged in")
+                return False
+
+            # Check for profile icon or nav bar (indicates logged in)
+            logged_in = await self._page.query_selector('[aria-label="Your profile"]') or \
+                        await self._page.query_selector('[aria-label="Профіль"]') or \
+                        await self._page.query_selector('svg[aria-label="Your profile"]')
+
+            if logged_in:
+                logger.info("Facebook session is active — user is logged in")
+                return True
+
+            # Additional check: look for "What's on your mind" text
+            post_box = await self._page.query_selector('[aria-label="Create a post"]') or \
+                       await self._page.query_selector('[aria-label="Створити допис"]')
+            if post_box:
+                logger.info("Facebook session is active — post creation available")
+                return True
+
+            logger.warning("Could not confirm Facebook login status")
+            return False
+
+        except Exception as e:
+            logger.error(f"Error checking Facebook auth: {e}")
+            return False
+
+    async def wait_for_login(self, timeout_minutes: int = 10):
+        """
+        Navigate to Facebook and wait for user to log in manually.
+        This method pauses until authentication is confirmed.
+        """
+        if not self._page:
+            raise RuntimeError("Browser not started. Call start() first.")
+
+        logger.info("Opening Facebook login page...")
+        await self._page.goto("https://www.facebook.com/", wait_until="domcontentloaded")
+
+        logger.info("=" * 60)
+        logger.info("ACTION REQUIRED: Please log into Facebook in the browser window.")
+        logger.info(f"Waiting up to {timeout_minutes} minutes...")
+        logger.info("=" * 60)
+
+        timeout_seconds = timeout_minutes * 60
+        poll_interval = 5
+        elapsed = 0
+
+        while elapsed < timeout_seconds:
+            try:
+                # Check if logged in
+                logged_in = await self.check_facebook_auth()
+                if logged_in:
+                    logger.info("Login detected! Proceeding...")
+                    return True
+            except Exception:
+                pass
+
+            await asyncio.sleep(poll_interval)
+            elapsed += poll_interval
+
+            if elapsed % 30 == 0:
+                logger.info(f"Still waiting for login... ({elapsed // 60}m {elapsed % 60}s elapsed)")
+
+        logger.error(f"Login timeout after {timeout_minutes} minutes")
+        return False
+
+    @staticmethod
+    def _find_chrome_executable() -> str:
+        """Find Chrome executable on the system."""
+        import shutil
+
+        possible_paths = []
+
+        if sys.platform == "win32":
+            possible_paths = [
+                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+                r"C:\Users\{}\AppData\Local\Google\Chrome\Application\chrome.exe".format(
+                    Path.home().name
+                ),
+            ]
+        elif sys.platform == "darwin":
+            possible_paths = [
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            ]
+        else:
+            possible_paths = [
+                "/usr/bin/google-chrome",
+                "/usr/bin/google-chrome-stable",
+                "/usr/bin/chromium-browser",
+                "/snap/bin/chromium",
+            ]
+
+        for path in possible_paths:
+            if Path(path).exists():
+                return path
+
+        # Try system PATH
+        for name in ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"]:
+            found = shutil.which(name)
+            if found:
+                return found
+
+        return ""
+
+    @staticmethod
+    def _get_default_user_data_dir() -> str:
+        """Get default Chrome user data directory for the platform."""
+        if sys.platform == "win32":
+            return str(Path.home() / "AppData" / "Local" / "Google" / "Chrome" / "User Data")
+        elif sys.platform == "darwin":
+            return str(Path.home() / "Library" / "Application Support" / "Google" / "Chrome")
+        else:
+            return str(Path.home() / ".config" / "google-chrome")

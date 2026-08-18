@@ -1,0 +1,6 @@
+# Photo URLs or local file paths
+# Add one photo URL or path per line
+# Lines starting with # are comments
+# Example:
+# https://example.com/photo1.jpg
+# /path/to/local/photo.jpg

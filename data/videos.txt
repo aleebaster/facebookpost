@@ -1,0 +1,6 @@
+# Video URLs or local file paths
+# Add one video URL or path per line
+# Lines starting with # are comments
+# Example:
+# https://example.com/video1.mp4
+# /path/to/local/video.mp4
