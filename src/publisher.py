@@ -17,6 +17,7 @@ States:
 import asyncio
 import random
 from enum import Enum
+from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 from loguru import logger
@@ -309,7 +310,11 @@ class Publisher:
         return state, result
 
     async def _enter_text(self, dialog, text, result):
-        """Type text into the dialog. Returns (state, result)."""
+        """Type text into the dialog. Returns (state, result).
+
+        Does full DOM diagnostics before searching for text field.
+        Checks contenteditable, role=textbox, textarea, and other candidates.
+        """
         # Retrieve dialog from result if not passed directly
         if dialog is None:
             dialog = result.get("_dialog")
@@ -326,37 +331,140 @@ class Publisher:
             logger.error("[POST] Dialog disappeared before text entry.")
             return ComposerState.FAILED, result
 
-        logger.info("[POST] Text field: searching...")
+        logger.info("[POST] Searching composer text input...")
 
-        text_selectors = [
-            'div[role="textbox"][contenteditable="true"]',
-            'div[contenteditable="true"][data-lexical-editor="true"]',
-            'div[contenteditable="true"]',
-            'textarea[aria-label*="Write"]',
-            'textarea[aria-label*="\u041d\u0430\u043f\u0438\u0448\u0456\u0442\u044c"]',
-        ]
+        # DOM diagnostics — count all candidate types
+        ce_count = 0
+        tb_count = 0
+        ta_count = 0
+        try:
+            ce_count = await dialog.locator('[contenteditable="true"]').count()
+        except Exception:
+            pass
+        try:
+            tb_count = await dialog.locator('[role="textbox"]').count()
+        except Exception:
+            pass
+        try:
+            ta_count = await dialog.locator('textarea').count()
+        except Exception:
+            pass
 
-        for selector in text_selectors:
+        logger.info(f"[POST] contenteditable count: {ce_count}")
+        logger.info(f"[POST] role=textbox count: {tb_count}")
+        logger.info(f"[POST] textarea count: {ta_count}")
+
+        # Build list of candidates with metadata
+        candidates = []
+
+        # Candidate 1: contenteditable div with role=textbox (most likely Facebook composer)
+        for sel in ['div[role="textbox"][contenteditable="true"]', '[contenteditable="true"]']:
             try:
-                element = dialog.locator(selector).first
-                count = await dialog.locator(selector).count()
-                if count > 0 and await element.is_visible():
-                    await element.click()
-                    await asyncio.sleep(0.5)
-                    await self.page.keyboard.type(text, delay=10)
-                    logger.info("[POST] Text field: FOUND")
-                    logger.info("[POST] Text entered: SUCCESS")
-                    state = ComposerState.TEXT_ENTERED
-                    result["composer_state"] = state
-                    return state, result
+                els = dialog.locator(sel)
+                count = await els.count()
+                for i in range(count):
+                    el = els.nth(i)
+                    try:
+                        visible = await el.is_visible()
+                        if not visible:
+                            continue
+                        tag = await el.evaluate('e => e.tagName')
+                        role = await el.evaluate('e => e.getAttribute("role") || ""')
+                        aria_label = await el.evaluate('e => e.getAttribute("aria-label") || ""')
+                        ce_val = await el.evaluate('e => e.getAttribute("contenteditable") || ""')
+                        bbox = await el.bounding_box()
+                        candidates.append({
+                            'selector': sel,
+                            'index': i,
+                            'tag': tag,
+                            'role': role,
+                            'aria_label': aria_label,
+                            'contenteditable': ce_val,
+                            'visible': True,
+                            'bbox': bbox,
+                            'score': 10 if role == 'textbox' else 5,
+                        })
+                        logger.info(f"[POST] Candidate #{len(candidates)-1}:")
+                        logger.info(f"    tag: {tag}")
+                        logger.info(f"    role: {role}")
+                        logger.info(f"    aria-label: {aria_label}")
+                        logger.info(f"    contenteditable: {ce_val}")
+                        logger.info(f"    visible: YES")
+                    except Exception:
+                        continue
             except Exception:
                 continue
 
-        logger.error("[POST] Text field: NOT FOUND")
-        result["status"] = PublicationStatus.FAILED.value
-        result["error"] = "Could not find post text input field inside dialog"
-        result["composer_state"] = ComposerState.FAILED
-        return ComposerState.FAILED, result
+        # Candidate 2: textarea
+        try:
+            els = dialog.locator('textarea')
+            count = await els.count()
+            for i in range(count):
+                el = els.nth(i)
+                try:
+                    visible = await el.is_visible()
+                    if not visible:
+                        continue
+                    tag = await el.evaluate('e => e.tagName')
+                    aria_label = await el.evaluate('e => e.getAttribute("aria-label") || ""')
+                    placeholder = await el.evaluate('e => e.getAttribute("placeholder") || ""')
+                    bbox = await el.bounding_box()
+                    candidates.append({
+                        'selector': 'textarea',
+                        'index': i,
+                        'tag': tag,
+                        'role': '',
+                        'aria_label': aria_label,
+                        'placeholder': placeholder,
+                        'visible': True,
+                        'bbox': bbox,
+                        'score': 3,
+                    })
+                    logger.info(f"[POST] Candidate #{len(candidates)-1}:")
+                    logger.info(f"    tag: {tag}")
+                    logger.info(f"    aria-label: {aria_label}")
+                    logger.info(f"    placeholder: {placeholder}")
+                    logger.info(f"    visible: YES")
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        if not candidates:
+            logger.error("[POST] Text field: NOT FOUND")
+            logger.error("[POST] No visible contenteditable, textbox, or textarea in dialog")
+            await self._save_composer_diagnostics("text_field_not_found")
+            result["status"] = PublicationStatus.FAILED.value
+            result["error"] = "Could not find post text input field inside dialog"
+            result["composer_state"] = ComposerState.FAILED
+            return ComposerState.FAILED, result
+
+        # Sort by score descending — pick the best candidate
+        candidates.sort(key=lambda c: c['score'], reverse=True)
+        best = candidates[0]
+
+        logger.info(f"[POST] Text field: FOUND")
+        logger.info(f"[POST] Text field tag: {best['tag']}")
+        logger.info(f"[POST] Text field role: {best.get('role', '')}")
+        logger.info(f"[POST] Text field contenteditable: {best.get('contenteditable', '')}")
+        logger.info(f"[POST] Text field visible: YES")
+
+        # Type text
+        try:
+            element = dialog.locator(best['selector']).nth(best['index'])
+            await element.click()
+            await asyncio.sleep(0.5)
+            await self.page.keyboard.type(text, delay=10)
+            logger.info("[POST] Text entered: SUCCESS")
+            state = ComposerState.TEXT_ENTERED
+            result["composer_state"] = state
+            return state, result
+        except Exception as e:
+            logger.error(f"[POST] Error typing text: {e}")
+            result["status"] = PublicationStatus.FAILED.value
+            result["error"] = f"Error typing text: {e}"
+            result["composer_state"] = ComposerState.FAILED
+            return ComposerState.FAILED, result
 
     async def _attach_media(self, dialog, result):
         """Attach photos and videos. Returns (state, result)."""
@@ -549,29 +657,103 @@ class Publisher:
     # ------------------------------------------------------------------ #
 
     async def _find_composer_dialog(self):
-        """Find the active composer dialog locator."""
-        dialog_selectors = [
-            '[role="dialog"]',
-            '[aria-label="Create a post"]',
-            '[aria-label="\u0421\u0442\u0432\u043e\u0440\u0438\u0442\u0438 \u0434\u043e\u043f\u0438\u0441"]',
-        ]
+        """Find the ACTUAL composer dialog by analyzing all visible [role="dialog"] elements.
 
-        for selector in dialog_selectors:
+        Facebook may show multiple dialogs (cookies, accessibility, etc.).
+        We pick the one that actually contains composer controls.
+        """
+        # Wait for at least one dialog to appear (Facebook SPA may take time)
+        for attempt in range(10):
             try:
-                dialogs = self.page.locator(selector)
-                count = await dialogs.count()
-                if count > 0:
-                    dialog = dialogs.last
-                    is_visible = await dialog.is_visible()
-                    if is_visible:
-                        logger.info(f"[POST] Dialog selector: {selector}")
-                        logger.info(f"[POST] Dialog count: {count}")
-                        return dialog
+                dialog_count = await self.page.locator('[role="dialog"]').count()
+                if dialog_count > 0:
+                    break
             except Exception:
+                pass
+            await asyncio.sleep(1)
+        else:
+            logger.error('[POST] No [role="dialog"] found after 10 seconds')
+            return None
+
+        logger.info(f"[POST] Visible dialogs: {dialog_count}")
+
+        # Analyze each dialog to find the actual composer
+        best_dialog = None
+        best_score = -1
+
+        for idx in range(dialog_count):
+            try:
+                dialog = self.page.locator('[role="dialog"]').nth(idx)
+                is_visible = await dialog.is_visible()
+                if not is_visible:
+                    logger.info(f"[POST] Dialog #{idx}: NOT VISIBLE — skipping")
+                    continue
+
+                # Count composer indicators inside this dialog
+                contenteditable_count = 0
+                textbox_count = 0
+                textarea_count = 0
+                file_input_count = 0
+                post_button_count = 0
+                dialog_text = ""
+
+                try:
+                    contenteditable_count = await dialog.locator('[contenteditable="true"]').count()
+                except Exception:
+                    pass
+                try:
+                    textbox_count = await dialog.locator('[role="textbox"]').count()
+                except Exception:
+                    pass
+                try:
+                    textarea_count = await dialog.locator('textarea').count()
+                except Exception:
+                    pass
+                try:
+                    file_input_count = await dialog.locator('input[type="file"]').count()
+                except Exception:
+                    pass
+                try:
+                    post_button_count = await dialog.locator('div[role="button"]').count()
+                except Exception:
+                    pass
+                try:
+                    dialog_text = await dialog.inner_text()
+                    dialog_text = dialog_text[:200].replace("\n", " ")
+                except Exception:
+                    pass
+
+                score = contenteditable_count * 3 + textbox_count * 3 + textarea_count * 2 + file_input_count + post_button_count
+
+                logger.info(f"[POST] Dialog #{idx}:" )
+                logger.info(f"    visible: YES")
+                logger.info(f"    contenteditable: {contenteditable_count}")
+                logger.info(f"    role=textbox: {textbox_count}")
+                logger.info(f"    textarea: {textarea_count}")
+                logger.info(f"    file inputs: {file_input_count}")
+                logger.info(f"    buttons: {post_button_count}")
+                logger.info(f"    text: {dialog_text[:100]}")
+                logger.info(f"    score: {score}")
+
+                if score > best_score:
+                    best_score = score
+                    best_dialog = dialog
+                    logger.info(f"    -> NEW BEST COMPOSER CANDIDATE")
+
+            except Exception as e:
+                logger.warning(f"[POST] Dialog #{idx}: error analyzing: {e}")
                 continue
 
-        logger.warning("[POST] No post composer dialog found")
-        return None
+        if best_dialog is None:
+            logger.error("[POST] No composer dialog found among visible dialogs")
+            await self._save_composer_diagnostics("no_composer_found")
+            return None
+
+        if best_score == 0:
+            logger.warning("[POST] Best dialog has score 0 — may not be the composer")
+
+        logger.info(f"[POST] Actual composer: FOUND (score={best_score})")
+        return best_dialog
 
     async def _attach_photos_in_dialog(self, dialog) -> bool:
         """Attach photos to the post inside the dialog."""
@@ -706,6 +888,27 @@ class Publisher:
     # ------------------------------------------------------------------ #
     #  Helpers                                                             #
     # ------------------------------------------------------------------ #
+
+    async def _save_composer_diagnostics(self, label: str):
+        """Save screenshot and page info when composer detection fails."""
+        try:
+            Path("logs").mkdir(exist_ok=True)
+            path = f"logs/composer_{label}.png"
+            await self.page.screenshot(path=path)
+            logger.info(f"[POST] Screenshot saved: {path}")
+        except Exception as e:
+            logger.warning(f"[POST] Could not save screenshot: {e}")
+
+        try:
+            page_url = self.page.url
+            title = await self.page.title()
+            dialog_count = await self.page.locator('[role="dialog"]').count()
+            logger.info(f"[POST] Diagnostic info:")
+            logger.info(f"    URL: {page_url}")
+            logger.info(f"    Title: {title}")
+            logger.info(f"    Dialog count: {dialog_count}")
+        except Exception:
+            pass
 
     def _log_db_fail(self, group_url, group_name, result):
         """Log a failed publication to the database."""
