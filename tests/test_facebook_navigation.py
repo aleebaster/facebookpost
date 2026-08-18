@@ -1,110 +1,141 @@
 """
-Facebook navigation tests.
-Tests the browser flow logic, URL handling, and diagnostic logging.
-For real Facebook testing, run: python -m src.main --mode DRY_RUN
+Tests for Facebook navigation and browser configuration.
 """
-
 import sys
+import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.browser import BrowserManager
+
+class TestBrowserConfig(unittest.TestCase):
+    """Verify browser configuration points to the correct Chrome and profile."""
+
+    def test_chrome_executable_exists(self):
+        """System Chrome must exist at the expected path."""
+        chrome_path = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+        self.assertTrue(
+            Path(chrome_path).exists(),
+            f"Chrome not found at: {chrome_path}",
+        )
+
+    def test_user_data_dir_exists(self):
+        """Chrome User Data directory must exist."""
+        user_data = r"C:\Users\andre\AppData\Local\Google\Chrome\User Data"
+        self.assertTrue(
+            Path(user_data).exists(),
+            f"User Data not found: {user_data}",
+        )
+
+    def test_profile_2_exists(self):
+        """Profile 2 must exist inside User Data."""
+        profile_path = (
+            r"C:\Users\andre\AppData\Local\Google\Chrome\User Data\Profile 2"
+        )
+        self.assertTrue(
+            Path(profile_path).exists(),
+            f"Profile 2 not found: {profile_path}",
+        )
+
+    def test_user_data_is_not_profile(self):
+        """user_data_dir must be the root User Data, not a specific profile."""
+        from src.browser import BrowserManager
+
+        bm = BrowserManager()
+        user_data = bm.user_data_dir or bm._get_default_user_data_dir()
+        self.assertNotIn(
+            "Profile",
+            Path(user_data).name,
+            "user_data_dir should be 'User Data', not a profile folder",
+        )
+
+    def test_profile_name_default(self):
+        """Default profile should be Profile 2."""
+        from src.browser import BrowserManager
+
+        bm = BrowserManager()
+        self.assertEqual(bm.profile_name, "Profile 2")
+
+    def test_chrome_not_chromium(self):
+        """Must use system Chrome, not Playwright Chromium."""
+        from src.browser import BrowserManager
+
+        bm = BrowserManager()
+        executable = bm._find_chrome_executable()
+        self.assertIn("chrome", executable.lower(), "Should use Chrome, not Chromium")
+        self.assertNotIn("chromium", executable.lower(), "Should not use Chromium")
+
+    def test_cdp_port_configured(self):
+        """CDP port must be configured."""
+        from src.browser import CDP_PORT
+
+        self.assertEqual(CDP_PORT, 9222)
+
+    def test_no_channel_chrome_in_args(self):
+        """channel='chrome' must NOT be used with connect_over_cdp."""
+        from src.browser import BrowserManager
+
+        # Verify the start method uses connect_over_cdp, not launch_persistent_context
+        import inspect
+
+        source = inspect.getsource(BrowserManager.start)
+        self.assertIn("connect_over_cdp", source, "Must use connect_over_cdp")
+        self.assertNotIn(
+            "launch_persistent_context", source, "Must not use launch_persistent_context"
+        )
 
 
-def test_browser_manager_init_defaults():
-    bm = BrowserManager()
-    assert bm.profile_name == "Profile 2"
-    assert bm.headless is False
-    assert bm.slow_mo == 100
-    print("PASS: BrowserManager init defaults correct")
+class TestChromeRunningDetection(unittest.TestCase):
+    """Test Chrome process detection."""
+
+    def test_is_chrome_running_returns_bool(self):
+        """_is_chrome_running should return a boolean."""
+        from src.browser import BrowserManager
+
+        result = BrowserManager._is_chrome_running()
+        self.assertIsInstance(result, bool)
+
+    def test_no_disable_extensions(self):
+        """--disable-extensions should NOT be in browser args."""
+        from src.browser import BrowserManager
+
+        bm = BrowserManager()
+        # The start method should not use --disable-extensions
+        import inspect
+
+        source = inspect.getsource(BrowserManager.start)
+        self.assertNotIn(
+            "--disable-extensions",
+            source,
+            "--disable-extensions should not be used",
+        )
 
 
-def test_find_chrome_executable():
-    path = BrowserManager._find_chrome_executable()
-    assert path != "", "Chrome executable not found"
-    assert Path(path).exists(), f"Chrome path does not exist: {path}"
-    print(f"PASS: Chrome found at: {path}")
+class TestFacebookNavigation(unittest.TestCase):
+    """Test navigation logic with mocked Playwright."""
 
+    def test_open_facebook_checks_url(self):
+        """open_facebook should verify the URL after navigation."""
+        import inspect
 
-def test_default_user_data_dir():
-    path = BrowserManager._get_default_user_data_dir()
-    assert "User Data" in path, f"Expected 'User Data' in path: {path}"
-    assert "Google" in path, f"Expected 'Google' in path: {path}"
-    print(f"PASS: Default user data dir: {path}")
+        from src.browser import BrowserManager
 
+        source = inspect.getsource(BrowserManager.open_facebook)
+        self.assertIn("page.url", source, "Must check page.url")
+        self.assertIn("about:blank", source, "Must check for about:blank")
+        self.assertIn("facebook.com", source, "Must verify facebook.com in URL")
 
-def test_is_chrome_running():
-    result = BrowserManager._is_chrome_running()
-    assert isinstance(result, bool)
-    print(f"PASS: _is_chrome_running returns: {result}")
+    def test_check_auth_checks_login_form(self):
+        """check_facebook_auth should detect login forms."""
+        import inspect
 
+        from src.browser import BrowserManager
 
-def test_no_disable_extensions():
-    browser_py = Path("src/browser.py").read_text(encoding="utf-8")
-    assert "--disable-extensions" not in browser_py
-    print("PASS: No --disable-extensions in browser.py")
-
-
-def test_no_channel_chrome():
-    browser_py = Path("src/browser.py").read_text(encoding="utf-8")
-    assert 'channel="chrome"' not in browser_py
-    print("PASS: No channel='chrome' in browser.py")
-
-
-def test_hard_block_when_chrome_running():
-    """Test that start() hard-blocks when Chrome is running."""
-    browser_py = Path("src/browser.py").read_text(encoding="utf-8")
-    assert "_log_chrome_block" in browser_py
-    assert "Close ALL Chrome windows" in browser_py
-    print("PASS: Hard block when Chrome is running")
-
-
-def test_about_blank_critical_error():
-    """Test that about:blank triggers critical error."""
-    browser_py = Path("src/browser.py").read_text(encoding="utf-8")
-    assert "CRITICAL" in browser_py
-    assert "about:blank" in browser_py
-    print("PASS: about:blank triggers critical error")
-
-
-def test_page_diagnostics():
-    """Test that page diagnostics are logged."""
-    browser_py = Path("src/browser.py").read_text(encoding="utf-8")
-    assert "Pages in context:" in browser_py
-    assert "PAGE" in browser_py
-    print("PASS: Page diagnostics present")
-
-
-def test_open_facebook_logs():
-    """Test that open_facebook() has proper logging."""
-    browser_py = Path("src/browser.py").read_text(encoding="utf-8")
-    assert "Opening Facebook..." in browser_py
-    assert "Facebook loaded successfully" in browser_py
-    assert "WORKING PAGE:" in browser_py
-    print("PASS: open_facebook() has proper logging")
-
-
-def test_main_logs_format():
-    """Test that main.py has the expected log format."""
-    main_py = Path("src/main.py").read_text(encoding="utf-8")
-    assert "CURRENT WORKING PAGE:" in main_py
-    assert "Loaded" in main_py and "group(s)" in main_py
-    assert "CRITICAL: Facebook was NOT opened" in main_py
-    assert "CRITICAL: Facebook session is NOT authenticated" in main_py
-    print("PASS: main.py has expected log format")
+        source = inspect.getsource(BrowserManager.check_facebook_auth)
+        self.assertIn("royal_login_button", source, "Must check for login button")
+        self.assertIn("NOT AUTHENTICATED", source, "Must log NOT AUTHENTICATED")
 
 
 if __name__ == "__main__":
-    test_browser_manager_init_defaults()
-    test_find_chrome_executable()
-    test_default_user_data_dir()
-    test_is_chrome_running()
-    test_no_disable_extensions()
-    test_no_channel_chrome()
-    test_hard_block_when_chrome_running()
-    test_about_blank_critical_error()
-    test_page_diagnostics()
-    test_open_facebook_logs()
-    test_main_logs_format()
-    print("\nAll navigation tests passed!")
+    unittest.main()

@@ -39,9 +39,21 @@ copy .env.example .env
 
 ## Chrome Profile Setup
 
-The bot uses your **existing Chrome Profile 2** where you are already logged into Facebook.
+The bot launches **your system Google Chrome** with your existing **Profile 2** using Chrome DevTools Protocol (CDP).
 
-**Do NOT** log into Facebook through the bot. The bot reads your existing session.
+**Do NOT** log into Facebook through the bot. The bot uses your existing session.
+
+### Architecture
+
+```
+Python -> Playwright CDP client -> System Google Chrome -> User Data/Profile 2 -> Facebook session
+```
+
+The bot:
+1. Checks that Chrome is NOT running (User Data would be locked)
+2. Launches `chrome.exe` with `--remote-debugging-port=9222` and your Profile 2
+3. Connects Playwright via CDP
+4. Navigates to Facebook using your existing session
 
 ### Configuration
 
@@ -55,15 +67,16 @@ browser:
 
 ### IMPORTANT: Close Chrome Before Running
 
-Playwright cannot access a Chrome profile that is already open in Chrome.
+Chrome locks the entire User Data directory when running. The bot needs to launch its own Chrome instance.
 
 **Before running the bot:**
-1. Close ALL Chrome windows that use Profile 2
-2. Then run the bot
-3. After the bot finishes, you can reopen Chrome normally
+1. Close ALL Chrome windows
+2. Wait 3 seconds
+3. Run the bot
+4. After the bot finishes, you can reopen Chrome normally
 
-If you see: `Chrome profile is currently locked by another Chrome instance!`
-- Close Chrome with Profile 2 and try again
+If you see: `Chrome is currently running and may lock the User Data directory`
+- Close ALL Chrome windows and try again
 
 ## Adding Property Photos and Videos
 
