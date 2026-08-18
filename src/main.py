@@ -43,6 +43,118 @@ def load_config(config_path: str = "config.yaml") -> dict:
         return yaml.safe_load(f)
 
 
+LOGIN_TIMEOUT_MINUTES = 60  # generous timeout for manual login
+
+
+async def run_login_mode(config_path: str = "config.yaml"):
+    """LOGIN mode: open Chrome, navigate to Facebook, wait for manual login."""
+    load_dotenv()
+    config = load_config(config_path)
+    setup_logging(config)
+
+    browser_config = config.get("browser", {})
+
+    logger.info("")
+    logger.info("=" * 60)
+    logger.info("FACEBOOK LOGIN MODE")
+    logger.info("=" * 60)
+    logger.info("")
+    logger.info("Chrome Profile 2 is open.")
+    logger.info("Facebook has been opened.")
+    logger.info("")
+    logger.info("Please log into Facebook MANUALLY in the Chrome window.")
+    logger.info("Do NOT enter credentials through the bot.")
+    logger.info("")
+    logger.info("After you finish logging in, return to this console.")
+    logger.info("The bot will check the Facebook session automatically.")
+    logger.info("=" * 60)
+    logger.info("")
+
+    browser = BrowserManager(
+        user_data_dir=browser_config.get("user_data_dir", ""),
+        profile_name=browser_config.get("profile_name", "Profile 2"),
+        chrome_binary=browser_config.get("chrome_binary", ""),
+        headless=browser_config.get("headless", False),
+        slow_mo=browser_config.get("slow_mo", 100),
+    )
+
+    try:
+        logger.info("[LOGIN 1] Starting Chrome Profile 2...")
+        page = await browser.start()
+
+        logger.info("[LOGIN 2] Connected to Chrome via CDP")
+        logger.info("[LOGIN 3] Opening Facebook...")
+        fb_opened = await browser.open_facebook()
+
+        if not fb_opened:
+            logger.error("[LOGIN 3] Failed to open Facebook.")
+            logger.error("Check that Chrome Profile 2 is not locked.")
+            return
+
+        logger.info("[LOGIN 4] Facebook loaded")
+
+        # Check if already authenticated
+        is_authenticated = await browser.check_facebook_auth()
+
+        if is_authenticated:
+            logger.info("[LOGIN 5] Facebook session: AUTHENTICATED")
+            logger.info("")
+            logger.info("=" * 60)
+            logger.info("FACEBOOK LOGIN SUCCESS")
+            logger.info("=" * 60)
+            logger.info("")
+            logger.info("Facebook session is already authenticated.")
+            logger.info("Profile: Profile 2")
+            logger.info("")
+            logger.info("Session is available for future bot runs.")
+            logger.info("No posts were published.")
+            logger.info("=" * 60)
+            return
+
+        logger.info("[LOGIN 5] Facebook session: NOT AUTHENTICATED")
+        logger.info("[LOGIN 6] Waiting for manual login...")
+        logger.info("")
+        logger.info("Log into Facebook in the Chrome window.")
+        logger.info(f"Timeout: {LOGIN_TIMEOUT_MINUTES} minutes")
+        logger.info("")
+
+        # Wait for manual login
+        logged_in = await browser.wait_for_login(
+            timeout_minutes=LOGIN_TIMEOUT_MINUTES
+        )
+
+        if logged_in:
+            logger.info("")
+            logger.info("=" * 60)
+            logger.info("FACEBOOK LOGIN SUCCESS")
+            logger.info("=" * 60)
+            logger.info("")
+            logger.info("Facebook session is authenticated.")
+            logger.info("Profile: Profile 2")
+            logger.info("")
+            logger.info("Session is available for future bot runs.")
+            logger.info("You can now close the LOGIN mode.")
+            logger.info("No posts were published.")
+            logger.info("=" * 60)
+        else:
+            logger.error("")
+            logger.error("=" * 60)
+            logger.error("LOGIN TIMEOUT")
+            logger.error("=" * 60)
+            logger.error(f"Login was not completed within {LOGIN_TIMEOUT_MINUTES} minutes.")
+            logger.error("Please try again with: python -m src.main --mode LOGIN")
+            logger.error("=" * 60)
+
+    except KeyboardInterrupt:
+        logger.info("LOGIN mode stopped by user (Ctrl+C)")
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        await browser.stop()
+
+
 async def run_bot(mode: str = "DRY_RUN", config_path: str = "config.yaml"):
     """Main bot execution loop."""
     # Load configuration
@@ -125,22 +237,23 @@ async def run_bot(mode: str = "DRY_RUN", config_path: str = "config.yaml"):
 
         if not is_logged_in:
             logger.error("")
-            logger.error("CRITICAL: Facebook session is NOT authenticated.")
-            if mode in ("MANUAL_APPROVAL", "AUTO"):
-                logger.info("Please log into Facebook in the browser window...")
-                logged_in = await browser.wait_for_login(timeout_minutes=5)
-                if not logged_in:
-                    logger.error("Login timeout. Exiting.")
-                    return
-            else:
-                logger.error(
-                    "Facebook session is not authenticated in Chrome Profile 2.\n"
-                    "Please log into Facebook manually in Chrome Profile 2\n"
-                    "and run the bot again."
-                )
-                return
+            logger.error("=" * 60)
+            logger.error("FACEBOOK SESSION NOT AUTHENTICATED")
+            logger.error("=" * 60)
+            logger.error("")
+            logger.error("Please run:")
+            logger.error("")
+            logger.error("  python -m src.main --mode LOGIN")
+            logger.error("")
+            logger.error("Log into Facebook manually in the Chrome window.")
+            logger.error("Then run your desired mode again.")
+            logger.error("")
+            logger.error("No posts were published.")
+            logger.error("=" * 60)
+            return
 
         # Both conditions met - safe to proceed
+        logger.info(f"Facebook session: AUTHENTICATED")
         logger.info(f"Loaded {group_manager.count} group(s)")
 
         # Initialize publisher
@@ -235,7 +348,7 @@ def main():
     parser = argparse.ArgumentParser(description="Facebook Property Posting Bot")
     parser.add_argument(
         "--mode",
-        choices=["DRY_RUN", "MANUAL_APPROVAL", "AUTO"],
+        choices=["LOGIN", "DRY_RUN", "MANUAL_APPROVAL", "AUTO"],
         default="DRY_RUN",
         help="Operating mode (default: DRY_RUN)",
     )
@@ -246,7 +359,11 @@ def main():
     )
 
     args = parser.parse_args()
-    asyncio.run(run_bot(mode=args.mode, config_path=args.config))
+
+    if args.mode == "LOGIN":
+        asyncio.run(run_login_mode(config_path=args.config))
+    else:
+        asyncio.run(run_bot(mode=args.mode, config_path=args.config))
 
 
 if __name__ == "__main__":
