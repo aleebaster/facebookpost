@@ -2,6 +2,13 @@
 # Add one group URL per line
 # Lines starting with # are comments
 
-https://www.facebook.com/groups/realtyua
-https://www.facebook.com/groups/realtyua2
-https://www.facebook.com/groups/neruhomistIvanoFrankivsk
+https://www.facebook.com/groups/198495843611050/
+https://www.facebook.com/groups/2163097207491364/
+https://www.facebook.com/groups/384749435353005/
+https://www.facebook.com/groups/1398193296986990/
+https://www.facebook.com/groups/4663023373734492/
+https://www.facebook.com/groups/1083134659158281/
+https://www.facebook.com/groups/251859925979909/
+https://www.facebook.com/groups/1987445401688236/
+https://www.facebook.com/groups/289659182134112/
+https://www.facebook.com/groups/901112195332839/
