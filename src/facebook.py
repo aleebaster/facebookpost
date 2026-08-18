@@ -24,7 +24,6 @@ class FacebookState(Enum):
 class FacebookHelper:
     """Helper class for Facebook interactions with safety checks."""
 
-    # Selectors for detecting Facebook safety prompts
     SAFETY_SELECTORS = {
         "captcha": [
             'iframe[src*="captcha"]',
@@ -53,28 +52,38 @@ class FacebookHelper:
     def __init__(self, page: Page):
         self.page = page
 
-    async def navigate_to(self, url: str, wait_until: str = "domcontentloaded") -> bool:
-        """Navigate to a URL and perform safety checks."""
+    async def navigate_to(self, url: str, wait_until: str = "domcontentloaded") -> Tuple[bool, str]:
+        """
+        Navigate to a URL and perform safety checks.
+        Returns (success, current_url).
+        """
         try:
+            logger.info(f"Navigating to: {url}")
             await self.page.goto(url, wait_until=wait_until, timeout=30000)
-            await asyncio.sleep(2)
+            await asyncio.sleep(3)
+
+            current_url = self.page.url
+            logger.info(f"Current URL: {current_url}")
+
+            # Verify we actually navigated to the target
+            if current_url == "about:blank":
+                logger.error("Navigation failed - browser is still on about:blank")
+                return False, current_url
 
             # Perform safety check after navigation
             state = await self.check_safety()
             if state != FacebookState.OK:
-                logger.warning(f"Safety issue detected after navigating to {url}: {state.value}")
-                return False
+                logger.warning(f"Safety issue detected: {state.value}")
+                return False, current_url
 
-            return True
+            return True, current_url
         except Exception as e:
             logger.error(f"Failed to navigate to {url}: {e}")
-            return False
+            current_url = self.page.url if self.page else "unknown"
+            return False, current_url
 
     async def check_safety(self) -> FacebookState:
-        """
-        Check the current page for Facebook safety prompts.
-        Returns the detected state.
-        """
+        """Check the current page for Facebook safety prompts."""
         for state_name, selectors in self.SAFETY_SELECTORS.items():
             for selector in selectors:
                 try:
@@ -119,14 +128,13 @@ class FacebookHelper:
 
     async def can_create_post(self) -> bool:
         """Check if the user can create a post in the current group."""
-        # Look for "Write something..." / "Напишіть щось..." post creation box
         post_selectors = [
             '[aria-label="Create a post"]',
-            '[aria-label="Створити допис"]',
+            '[aria-label="\u0421\u0442\u0432\u043e\u0440\u0438\u0442\u0438 \u0434\u043e\u043f\u0438\u0441"]',
             '[aria-label="Write something..."]',
-            '[aria-label="Напишіть щось..."]',
+            '[aria-label="\u041d\u0430\u043f\u0438\u0448\u0456\u0442\u044c \u0449\u043e\u0441\u044c..."]',
             '[data-pagelet="FeedComposer"]',
-            'div[role="button"]:has-text("Напишіть щось")',
+            'div[role="button"]:has-text("\u041d\u0430\u043f\u0438\u0448\u0456\u0442\u044c \u0449\u043e\u0441\u044c")',
             'div[role="button"]:has-text("Write something")',
         ]
 
@@ -144,10 +152,10 @@ class FacebookHelper:
         """Click the 'Create a post' button in the group."""
         post_selectors = [
             '[aria-label="Create a post"]',
-            '[aria-label="Створити допис"]',
+            '[aria-label="\u0421\u0442\u0432\u043e\u0440\u0438\u0442\u0438 \u0434\u043e\u043f\u0438\u0441"]',
             '[aria-label="Write something..."]',
-            '[aria-label="Напишіть щось..."]',
-            'div[role="button"]:has-text("Напишіть щось")',
+            '[aria-label="\u041d\u0430\u043f\u0438\u0448\u0456\u0442\u044c \u0449\u043e\u0441\u044c..."]',
+            'div[role="button"]:has-text("\u041d\u0430\u043f\u0438\u0448\u0456\u0442\u044c \u0449\u043e\u0441\u044c")',
             'div[role="button"]:has-text("Write something")',
         ]
 
@@ -172,17 +180,14 @@ class FacebookHelper:
             return ""
 
     async def check_for_errors(self) -> Tuple[bool, str]:
-        """
-        Check for common Facebook errors on the page.
-        Returns (has_error, error_message).
-        """
+        """Check for common Facebook errors on the page."""
         error_selectors = [
             ("div[role='alert']", "Facebook alert detected"),
             ("div[class*='error']", "Facebook error page"),
             ("div:has-text('Something went wrong')", "Something went wrong"),
-            ("div:has-text('Щось пішло не так')", "Something went wrong (UA)"),
-            ("div:has-text('This content isn't available')", "Content not available"),
-            ("div:has-text('Цей контент недоступний')", "Content not available (UA)"),
+            ("div:has-text('\u0429\u043e\u0441\u044c \u043f\u0456\u0434\u043b\u043e \u043d\u0435 \u0442\u0430\u043a')", "Something went wrong (UA)"),
+            ("div:has-text(\"This content isn't available\")", "Content not available"),
+            ("div:has-text('\u0426\u0435\u0439 \u043a\u043e\u043d\u0442\u0435\u043d\u0442 \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u0438\u0439')", "Content not available (UA)"),
         ]
 
         for selector, message in error_selectors:
@@ -190,7 +195,7 @@ class FacebookHelper:
                 element = await self.page.query_selector(selector)
                 if element:
                     text = await element.text_content() or message
-                    logger.warning(f"Facebook error detected: {message} — {text[:200]}")
+                    logger.warning(f"Facebook error detected: {message} -- {text[:200]}")
                     return True, text[:500]
             except Exception:
                 continue

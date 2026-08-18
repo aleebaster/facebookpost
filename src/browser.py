@@ -4,6 +4,7 @@ Provides persistent Chrome profile using Playwright.
 """
 
 import asyncio
+import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
@@ -36,7 +37,7 @@ class BrowserManager:
 
     async def start(self) -> Page:
         """Launch Chrome with persistent profile and return a page."""
-        logger.info("Starting browser with persistent profile...")
+        logger.info("Starting Chrome Profile 2...")
 
         # Determine Chrome executable path
         chrome_path = self.chrome_binary or self._find_chrome_executable()
@@ -63,30 +64,35 @@ class BrowserManager:
             logger.warning("Chrome will create it, but it won't have your Facebook session")
 
         # Check if Chrome is already running with this profile
-        lock_file = profile_path / "SingletonLock"
-        if lock_file.exists():
-            logger.error("Chrome profile is currently locked by another Chrome instance!")
-            logger.error(f"Close all Chrome windows using '{self.profile_name}' and try again.")
-            logger.error(f"Lock file: {lock_file}")
+        if self._is_chrome_running():
+            logger.error("=" * 60)
+            logger.error("Chrome is currently running!")
+            logger.error("")
+            logger.error("Playwright cannot use a Chrome profile that is already open.")
+            logger.error("")
+            logger.error("To fix this:")
+            logger.error("  1. Close ALL Chrome windows")
+            logger.error("  2. Wait a few seconds")
+            logger.error("  3. Run the bot again")
+            logger.error("")
+            logger.error(f"Profile: {self.profile_name}")
+            logger.error(f"User data: {user_data}")
+            logger.error("=" * 60)
             raise RuntimeError(
-                f"Chrome profile '{self.profile_name}' is locked. "
-                f"Close Chrome windows using this profile and try again."
+                f"Chrome is running. Close all Chrome windows and try again."
             )
 
         # Debug logging
-        logger.info("=" * 60)
         logger.info("Chrome user data directory:")
         logger.info(f"  {user_data}")
         logger.info("Chrome profile:")
         logger.info(f"  {self.profile_name}")
-        logger.info(f"Chrome executable:")
+        logger.info("Chrome executable:")
         logger.info(f"  {chrome_path}")
-        logger.info("=" * 60)
 
         self._playwright = await async_playwright().start()
 
         # Launch persistent context with the existing Chrome profile
-        # Note: do not use channel — it conflicts with executable_path
         self._context = await self._playwright.chromium.launch_persistent_context(
             user_data_dir=user_data,
             executable_path=chrome_path,
@@ -111,6 +117,32 @@ class BrowserManager:
 
         logger.info("Browser started successfully")
         return self._page
+
+    async def open_facebook(self) -> bool:
+        """
+        Navigate to Facebook homepage.
+        This ensures the browser is NOT on about:blank.
+        """
+        if not self._page:
+            raise RuntimeError("Browser not started. Call start() first.")
+
+        logger.info("Opening Facebook...")
+        try:
+            await self._page.goto("https://www.facebook.com/", wait_until="domcontentloaded", timeout=30000)
+            await asyncio.sleep(2)
+
+            current_url = self._page.url
+            logger.info(f"Current URL: {current_url}")
+
+            if "facebook.com" in current_url:
+                logger.info("Facebook opened successfully")
+                return True
+            else:
+                logger.warning(f"Facebook did not load correctly. Current URL: {current_url}")
+                return False
+        except Exception as e:
+            logger.error(f"Failed to open Facebook: {e}")
+            return False
 
     async def stop(self):
         """Close browser and clean up."""
@@ -143,18 +175,35 @@ class BrowserManager:
             return False
 
         try:
-            logger.info("Facebook session: CHECKING...")
-            await self._page.goto("https://www.facebook.com/", wait_until="domcontentloaded")
-            await asyncio.sleep(3)
+            # Make sure we are on Facebook first
+            current_url = self._page.url
+            if "facebook.com" not in current_url:
+                logger.info("Not on Facebook yet, navigating...")
+                nav_ok = await self.open_facebook()
+                if not nav_ok:
+                    return False
 
-            # Check for login form — if present, user is NOT logged in
+            logger.info("Facebook session: CHECKING...")
+            await asyncio.sleep(2)
+
+            current_url = self._page.url
+            logger.info(f"Current URL: {current_url}")
+
+            # Check for login form
             login_form = await self._page.query_selector('button[data-testid="royal_login_button"]')
             if login_form:
                 logger.warning("Facebook login form detected - user is NOT logged in")
                 logger.info("Facebook session: NOT AUTHENTICATED")
                 return False
 
-            # Check for profile icon or nav bar (indicates logged in)
+            # Check for checkpoint
+            checkpoint = await self._page.query_selector('[data-testid="checkpoint_title"]')
+            if checkpoint:
+                logger.warning("Facebook checkpoint detected - verification required")
+                logger.info("Facebook session: NOT AUTHENTICATED (checkpoint)")
+                return False
+
+            # Check for profile icon or nav bar
             logged_in = await self._page.query_selector('[aria-label="Your profile"]') or \
                         await self._page.query_selector('[aria-label="\u041f\u0440\u043e\u0444\u0456\u043b\u044c"]') or \
                         await self._page.query_selector('svg[aria-label="Your profile"]')
@@ -163,17 +212,15 @@ class BrowserManager:
                 logger.info("Facebook session: AUTHENTICATED")
                 return True
 
-            # Additional check: look for post creation box
+            # Additional check: post creation box
             post_box = await self._page.query_selector('[aria-label="Create a post"]') or \
                        await self._page.query_selector('[aria-label="\u0421\u0442\u0432\u043e\u0440\u0438\u0442\u0438 \u0434\u043e\u043f\u0438\u0441"]')
             if post_box:
                 logger.info("Facebook session: AUTHENTICATED")
                 return True
 
-            # Check page URL — if we're on facebook.com and not on login page, likely logged in
-            current_url = self._page.url
+            # Check page URL
             if "facebook.com" in current_url and "/login" not in current_url and "/checkpoint" not in current_url:
-                # Try to find any content that indicates logged-in state
                 logged_in_indicators = [
                     '[aria-label="Home"]',
                     '[aria-label="\u0413\u043e\u043b\u043e\u0432\u043d\u0430"]',
@@ -195,10 +242,7 @@ class BrowserManager:
             return False
 
     async def wait_for_login(self, timeout_minutes: int = 10):
-        """
-        Navigate to Facebook and wait for user to log in manually.
-        This method pauses until authentication is confirmed.
-        """
+        """Navigate to Facebook and wait for user to log in manually."""
         if not self._page:
             raise RuntimeError("Browser not started. Call start() first.")
 
@@ -233,6 +277,25 @@ class BrowserManager:
         return False
 
     @staticmethod
+    def _is_chrome_running() -> bool:
+        """Check if Chrome is currently running on the system."""
+        try:
+            if sys.platform == "win32":
+                result = subprocess.run(
+                    ["tasklist", "/FI", "IMAGENAME eq chrome.exe"],
+                    capture_output=True, text=True, timeout=5
+                )
+                return "chrome.exe" in result.stdout.lower()
+            else:
+                result = subprocess.run(
+                    ["pgrep", "-f", "chrome"],
+                    capture_output=True, text=True, timeout=5
+                )
+                return result.returncode == 0
+        except Exception:
+            return False
+
+    @staticmethod
     def _find_chrome_executable() -> str:
         """Find Chrome executable on the system."""
         import shutil
@@ -263,7 +326,6 @@ class BrowserManager:
             if Path(path).exists():
                 return path
 
-        # Try system PATH
         for name in ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"]:
             found = shutil.which(name)
             if found:

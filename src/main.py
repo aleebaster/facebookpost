@@ -6,7 +6,6 @@ Orchestrates the full publication workflow.
 import asyncio
 import random
 import sys
-import time
 from pathlib import Path
 from typing import Optional
 
@@ -75,7 +74,15 @@ async def run_bot(mode: str = "DRY_RUN", config_path: str = "config.yaml"):
     media_manager = MediaManager(
         photos_file=media_config.get("photos_file", "data/photos.txt"),
         videos_file=media_config.get("videos_file", "data/videos.txt"),
+        photos_dir=media_config.get("photos_dir", "data/photos"),
+        videos_dir=media_config.get("videos_dir", "data/videos"),
     )
+
+    # Show media summary
+    photo_count = len(media_manager.photos)
+    video_count = len(media_manager.videos)
+    logger.info(f"Photos found: {photo_count}")
+    logger.info(f"Videos found: {video_count}")
 
     # Generate content variations
     content_generator = ContentGenerator(
@@ -100,6 +107,12 @@ async def run_bot(mode: str = "DRY_RUN", config_path: str = "config.yaml"):
     try:
         page = await browser.start()
 
+        # Open Facebook
+        fb_opened = await browser.open_facebook()
+        if not fb_opened:
+            logger.error("Failed to open Facebook. Exiting.")
+            return
+
         # Check if logged in
         is_logged_in = await browser.check_facebook_auth()
 
@@ -119,8 +132,6 @@ async def run_bot(mode: str = "DRY_RUN", config_path: str = "config.yaml"):
                 )
                 return
 
-        logger.info("Facebook authentication confirmed [OK]")
-
         # Initialize publisher
         publisher = Publisher(
             page=page,
@@ -135,8 +146,15 @@ async def run_bot(mode: str = "DRY_RUN", config_path: str = "config.yaml"):
         min_interval = timing_config.get("min_post_interval", 180)
         max_interval = timing_config.get("max_post_interval", 420)
 
+        total = group_manager.count
         for i, group_url in enumerate(group_manager):
-            logger.info(f"\n--- Processing group {i + 1}/{group_manager.count} ---")
+            group_num = i + 1
+            logger.info("")
+            logger.info("=" * 60)
+            logger.info(f"[{group_num}/{total}]")
+            logger.info(f"Target group:")
+            logger.info(f"  {group_url}")
+            logger.info("=" * 60)
 
             # Check consecutive failures
             if publisher.consecutive_failures >= max_failures:
@@ -147,22 +165,25 @@ async def run_bot(mode: str = "DRY_RUN", config_path: str = "config.yaml"):
                 break
 
             # Publish to group
-            result = await publisher.publish_to_group(group_url, mode=mode)
+            result = await publisher.publish_to_group(
+                group_url,
+                mode=mode,
+                group_index=group_num,
+                total_groups=total,
+            )
 
             # Log result
-            status_icon = {
+            status_label = {
                 "SUCCESS": "[OK]",
                 "FAILED": "[FAIL]",
                 "SKIPPED": "[SKIP]",
                 "REQUIRES_MANUAL_ACTION": "[WARN]",
                 "FACEBOOK_RESTRICTION": "[BLOCKED]",
             }
-            icon = status_icon.get(result["status"], "[??]")
-            logger.info(
-                f"{icon} {result['status']}: {result['group_name'] or group_url}"
-            )
+            label = status_label.get(result["status"], "[??]")
+            logger.info(f"Result: {label} {result['status']}")
             if result["error"]:
-                logger.info(f"   Detail: {result['error']}")
+                logger.info(f"Detail: {result['error']}")
 
             # Pause between groups (except after last group)
             if i < group_manager.count - 1:
@@ -181,7 +202,8 @@ async def run_bot(mode: str = "DRY_RUN", config_path: str = "config.yaml"):
 
     # Print summary
     stats = database.get_stats()
-    logger.info("\n" + "=" * 60)
+    logger.info("")
+    logger.info("=" * 60)
     logger.info("Publication Summary:")
     for status, count in stats.items():
         logger.info(f"  {status}: {count}")

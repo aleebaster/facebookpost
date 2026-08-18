@@ -11,6 +11,12 @@ auth_data/
 *.sqlite
 *.db
 
+# Media files (user's photos and videos)
+data/photos/*
+data/videos/*
+!data/photos/.gitkeep
+!data/videos/.gitkeep
+
 # Logs (private data)
 logs/private/
 

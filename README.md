@@ -26,7 +26,6 @@ cd facebookpost
 # Create virtual environment
 python -m venv venv
 venv\Scripts\activate   # Windows
-# source venv/bin/activate   # Linux/Mac
 
 # Install dependencies
 pip install -r requirements.txt
@@ -54,9 +53,6 @@ browser:
   profile_name: "Profile 2"
 ```
 
-- `user_data_dir` — Chrome's User Data root directory (NOT a profile subfolder)
-- `profile_name` — The profile folder name inside User Data (e.g. "Default", "Profile 2")
-
 ### IMPORTANT: Close Chrome Before Running
 
 Playwright cannot access a Chrome profile that is already open in Chrome.
@@ -69,6 +65,56 @@ Playwright cannot access a Chrome profile that is already open in Chrome.
 If you see: `Chrome profile is currently locked by another Chrome instance!`
 - Close Chrome with Profile 2 and try again
 
+## Adding Property Photos and Videos
+
+**The simplest way** — copy files directly into the project folders:
+
+### Photos
+
+```
+C:\AI\facebookpost\data\photos\
+```
+
+Supported formats: `.jpg`, `.jpeg`, `.png`, `.webp`
+
+Example:
+```
+data/photos/
+  ├── house1.jpg
+  ├── house2.jpg
+  ├── house3.jpg
+  └── yard.jpg
+```
+
+### Videos
+
+```
+C:\AI\facebookpost\data\videos\
+```
+
+Supported formats: `.mp4`, `.mov`, `.webm`
+
+Example:
+```
+data/videos/
+  └── house-tour.mp4
+```
+
+The bot automatically detects all media files in these folders on startup:
+
+```
+Photos found: 4
+Videos found: 1
+```
+
+### Legacy: URL Files
+
+You can also add photo/video URLs in text files:
+- `data/photos.txt` — one URL per line
+- `data/videos.txt` — one URL per line
+
+The bot loads from **both** local folders and URL files.
+
 ## Configuration
 
 ### Add Facebook Group URLs
@@ -78,23 +124,6 @@ Edit `data/groups.txt` — one URL per line:
 ```
 https://www.facebook.com/groups/123456789
 https://www.facebook.com/groups/realestate-burshytyn
-```
-
-### Add Photo URLs
-
-Edit `data/photos.txt` — one URL or local path per line:
-
-```
-https://example.com/house-photo-1.jpg
-C:\Users\You\Pictures\house.jpg
-```
-
-### Add Video URLs
-
-Edit `data/videos.txt` — one URL or local path per line:
-
-```
-https://example.com/house-tour.mp4
 ```
 
 ### Configure Timing
@@ -114,7 +143,7 @@ timing:
 
 ### DRY_RUN Mode
 
-Shows what would be published without actually posting:
+Tests the full workflow (navigation, group checks, content preparation) but does NOT publish:
 
 ```bash
 python -m src.main --mode DRY_RUN
@@ -153,8 +182,12 @@ facebookpost/
 │   └── main.py              # Main entry point
 ├── data/
 │   ├── groups.txt           # Facebook group URLs
-│   ├── photos.txt           # Photo URLs/paths
-│   ├── videos.txt           # Video URLs/paths
+│   ├── photos/              # Put your photos here
+│   │   └── .gitkeep
+│   ├── videos/              # Put your videos here
+│   │   └── .gitkeep
+│   ├── photos.txt           # Legacy: photo URLs
+│   ├── videos.txt           # Legacy: video URLs
 │   └── publications.db      # Publication log (auto-created)
 ├── logs/                    # Log files
 ├── tests/                   # Tests

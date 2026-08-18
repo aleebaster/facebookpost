@@ -5,7 +5,7 @@ Handles the actual posting process to Facebook groups.
 
 import asyncio
 import random
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 from loguru import logger
 from playwright.async_api import Page
@@ -42,6 +42,8 @@ class Publisher:
         self,
         group_url: str,
         mode: str = "DRY_RUN",
+        group_index: int = 0,
+        total_groups: int = 1,
         force: bool = False,
     ) -> Dict:
         """
@@ -50,6 +52,8 @@ class Publisher:
         Args:
             group_url: URL of the Facebook group
             mode: DRY_RUN, MANUAL_APPROVAL, or AUTO
+            group_index: Current group number (1-based)
+            total_groups: Total number of groups
             force: If True, publish even if previously successful
 
         Returns:
@@ -65,29 +69,51 @@ class Publisher:
         }
 
         try:
-            # Step 1: Check if already published (unless forced)
-            if not force and self.db.was_successful(group_url):
+            # Step 1: Check if already published (skip in DRY_RUN to allow navigation test)
+            if mode != "DRY_RUN" and not force and self.db.was_successful(group_url):
                 logger.info(f"Already published to this group, skipping: {group_url}")
                 result["status"] = PublicationStatus.SKIPPED.value
                 result["error"] = "Already published previously"
                 return result
 
             # Step 2: Navigate to group
-            logger.info(f"Navigating to group: {group_url}")
-            nav_ok = await self.fb.navigate_to(group_url)
+            nav_ok, current_url = await self.fb.navigate_to(group_url)
+
             if not nav_ok:
+                # Check if we're on about:blank
+                if current_url == "about:blank":
+                    result["status"] = PublicationStatus.FAILED.value
+                    result["error"] = "NAVIGATION_FAILED - browser is on about:blank"
+                    logger.error(f"Navigation FAILED")
+                    logger.error(f"Target URL: {group_url}")
+                    logger.error(f"Current URL: {current_url}")
+                    self.db.log_publication(
+                        group_url=group_url,
+                        status=PublicationStatus.FAILED.value,
+                        error_message=result["error"],
+                    )
+                    return result
+
+                # Check for safety issues
                 safety_state = await self.fb.check_safety()
                 if safety_state != FacebookState.OK:
                     result["status"] = self._map_safety_state(safety_state)
                     result["error"] = f"Safety issue: {safety_state.value}"
+                    logger.error(f"Navigation FAILED - safety issue: {safety_state.value}")
+                    logger.error(f"Target URL: {group_url}")
+                    logger.error(f"Current URL: {current_url}")
                     self.db.log_publication(
                         group_url=group_url,
                         status=result["status"],
                         error_message=result["error"],
                     )
                     return result
+
                 result["status"] = PublicationStatus.FAILED.value
-                result["error"] = "Failed to navigate to group"
+                result["error"] = f"Navigation failed. Current URL: {current_url}"
+                logger.error(f"Navigation FAILED")
+                logger.error(f"Target URL: {group_url}")
+                logger.error(f"Current URL: {current_url}")
                 self.db.log_publication(
                     group_url=group_url,
                     status=PublicationStatus.FAILED.value,
@@ -95,15 +121,23 @@ class Publisher:
                 )
                 return result
 
+            # Navigation succeeded
+            logger.info(f"Group navigation: SUCCESS")
+
+            # Verify we're actually on a Facebook group page
+            if "facebook.com/groups/" not in current_url.lower():
+                logger.warning(f"Current URL is not a group page: {current_url}")
+
             # Step 3: Get group name
             group_name = await self.fb.get_group_name()
             result["group_name"] = group_name
-            logger.info(f"Group name: {group_name or 'Unknown'}")
+            if group_name:
+                logger.info(f"Group name: {group_name}")
 
             # Step 4: Check if posting is allowed
             can_post = await self.fb.can_create_post()
             if not can_post:
-                logger.warning(f"Cannot create post in this group: {group_url}")
+                logger.warning(f"Cannot create post in this group")
                 result["status"] = PublicationStatus.SKIPPED.value
                 result["error"] = "Post creation not available in this group"
                 self.db.log_publication(
@@ -114,11 +148,14 @@ class Publisher:
                 )
                 return result
 
+            logger.info("Post creation: AVAILABLE")
+
             # Step 5: Check for Facebook errors
             has_error, error_text = await self.fb.check_for_errors()
             if has_error:
                 result["status"] = PublicationStatus.FAILED.value
                 result["error"] = error_text
+                logger.error(f"Facebook error: {error_text[:200]}")
                 self.db.log_publication(
                     group_url=group_url,
                     group_name=group_name,
@@ -136,6 +173,7 @@ class Publisher:
             if validation_errors:
                 result["status"] = PublicationStatus.FAILED.value
                 result["error"] = f"Content validation failed: {'; '.join(validation_errors)}"
+                logger.error(f"Content validation failed: {validation_errors}")
                 self.db.log_publication(
                     group_url=group_url,
                     group_name=group_name,
@@ -143,6 +181,8 @@ class Publisher:
                     error_message=result["error"],
                 )
                 return result
+
+            logger.info("Content validation: OK")
 
             # Step 7: Handle based on mode
             if mode == "DRY_RUN":
@@ -170,18 +210,28 @@ class Publisher:
             return result
 
     async def _dry_run(self, group_url, group_name, text, result):
-        """DRY_RUN mode - show what would be published."""
-        logger.info("=" * 50)
-        logger.info(f"DRY RUN — Would publish to: {group_name or group_url}")
+        """DRY_RUN mode - show what would be published, no actual posting."""
+        logger.info(f"Mode: DRY_RUN")
+
+        # Media check
+        photo_count = len(self.media.photos) if self.media.has_photos else 0
+        video_count = len(self.media.videos) if self.media.has_videos else 0
+        logger.info(f"Media check: OK")
+        logger.info(f"Photos: {photo_count}")
+        logger.info(f"Videos: {video_count}")
+
+        # Show text preview
         logger.info(f"Text variation #{result['text_variation_index']}:")
         logger.info("-" * 30)
-        logger.info(text)
+        # Log first 3 lines of text as preview
+        text_lines = text.strip().split("\n")
+        for line in text_lines[:5]:
+            logger.info(f"  {line}")
+        if len(text_lines) > 5:
+            logger.info(f"  ... ({len(text_lines)} lines total)")
         logger.info("-" * 30)
-        if self.media.has_photos:
-            logger.info(f"Photos: {len(self.media.photos)} file(s)")
-        if self.media.has_videos:
-            logger.info(f"Videos: {len(self.media.videos)} file(s)")
-        logger.info("=" * 50)
+
+        logger.info(f"Publishing: SKIPPED (DRY_RUN)")
 
         result["status"] = PublicationStatus.SUCCESS.value
         result["error"] = "DRY_RUN - no actual publication"
@@ -202,8 +252,7 @@ class Publisher:
 
     async def _manual_approval(self, group_url, group_name, text, result):
         """MANUAL_APPROVAL mode - show content and wait for user confirmation."""
-        logger.info("=" * 50)
-        logger.info(f"MANUAL APPROVAL — Publish to: {group_name or group_url}")
+        logger.info(f"Mode: MANUAL_APPROVAL")
         logger.info(f"Text variation #{result['text_variation_index']}:")
         logger.info("-" * 30)
         logger.info(text)
@@ -230,7 +279,6 @@ class Publisher:
             else:
                 logger.info("Please enter y (yes), n (no), or quit")
 
-        # Proceed with publication
         return await self._actual_publish(group_url, group_name, text, result)
 
     async def _auto_publish(self, group_url, group_name, text, result):
@@ -370,13 +418,12 @@ class Publisher:
 
     async def _type_post_text(self, text: str) -> bool:
         """Type text into the post creation form."""
-        # Look for the contenteditable div or textarea in the post form
         selectors = [
             'div[role="textbox"][contenteditable="true"]',
             'div[contenteditable="true"][data-lexical-editor="true"]',
             'div[contenteditable="true"]',
             'textarea[aria-label*="Write"]',
-            'textarea[aria-label*="Напишіть"]',
+            'textarea[aria-label*="\u041d\u0430\u043f\u0438\u0448\u0456\u0442\u044c"]',
         ]
 
         for selector in selectors:
@@ -385,7 +432,6 @@ class Publisher:
                 if element:
                     await element.click()
                     await asyncio.sleep(0.5)
-                    # Type text using keyboard to work with contenteditable
                     await self.page.keyboard.type(text, delay=10)
                     logger.info("Post text typed successfully")
                     return True
@@ -398,20 +444,18 @@ class Publisher:
     async def _attach_photos(self) -> bool:
         """Attach photos to the post."""
         try:
-            # Find the photo upload button
             photo_selectors = [
                 'input[accept*="image"]',
                 'input[accept*="photo"]',
                 'input[type="file"][accept*="image"]',
                 'div[aria-label*="Photo"] input[type="file"]',
-                'div[aria-label*="Фото"] input[type="file"]',
+                'div[aria-label*="\u0424\u043e\u0442\u043e"] input[type="file"]',
             ]
 
             for selector in photo_selectors:
                 try:
                     element = await self.page.query_selector(selector)
                     if element:
-                        # Upload photos
                         for photo_url in self.media.photos:
                             await element.set_input_files(photo_url)
                             await asyncio.sleep(2)
@@ -433,7 +477,7 @@ class Publisher:
                 'input[accept*="video"]',
                 'input[type="file"][accept*="video"]',
                 'div[aria-label*="Video"] input[type="file"]',
-                'div[aria-label*="Відео"] input[type="file"]',
+                'div[aria-label*="\u0412\u0456\u0434\u0435\u043e"] input[type="file"]',
             ]
 
             for selector in video_selectors:
@@ -455,22 +499,21 @@ class Publisher:
             return False
 
     async def _click_post_button(self) -> bool:
-        """Click the final 'Post' / 'Опублікувати' button."""
+        """Click the final 'Post' / 'Publish' button."""
         post_selectors = [
             'div[role="button"]:has-text("Post")',
-            'div[role="button"]:has-text("Опублікувати")',
-            'div[role="button"]:has-text("Поділитися")',
+            'div[role="button"]:has-text("\u041e\u043f\u0443\u0431\u043b\u0456\u043a\u0443\u0432\u0430\u0442\u0438")',
+            'div[role="button"]:has-text("\u041f\u043e\u0434\u0456\u043b\u0438\u0442\u0438\u0441\u044f")',
             'button:has-text("Post")',
-            'button:has-text("Опублікувати")',
+            'button:has-text("\u041e\u043f\u0443\u0431\u043b\u0456\u043a\u0443\u0432\u0430\u0442\u0438")',
             '[aria-label="Post"]',
-            '[aria-label="Опублікувати"]',
+            '[aria-label="\u041e\u043f\u0443\u0431\u043b\u0456\u043a\u0443\u0432\u0430\u0442\u0438"]',
         ]
 
         for selector in post_selectors:
             try:
                 element = await self.page.query_selector(selector)
                 if element:
-                    # Check if button is enabled
                     disabled = await element.get_attribute("aria-disabled")
                     if disabled == "true":
                         logger.warning("Post button is disabled")

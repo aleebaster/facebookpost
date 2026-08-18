@@ -72,10 +72,15 @@ content:
 
 # Media configuration
 media:
-  # Path to file containing photo URLs (one per line)
-  photos_file: "data/photos.txt"
+  # Local directories for photos and videos (PRIMARY method)
+  # Just copy your files here:
+  #   data/photos/house1.jpg
+  #   data/videos/house-tour.mp4
+  photos_dir: "data/photos"
+  videos_dir: "data/videos"
 
-  # Path to file containing video URLs (one per line)
+  # Legacy: URL files (one URL per line)
+  photos_file: "data/photos.txt"
   videos_file: "data/videos.txt"
 
   # Max file size in MB
