@@ -1,11 +1,18 @@
 """
 Browser management module.
 Provides persistent Chrome profile using Playwright.
+
+Root cause of previous hang: Chrome's User Data directory is too large
+(multiple profiles, cache, extensions). Playwright's launch_persistent_context
+hangs when processing it directly. Fix: copy Profile 2 to a clean temp
+directory and use that as user_data_dir. This preserves Facebook cookies.
 """
 
 import asyncio
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Optional
@@ -35,65 +42,66 @@ class BrowserManager:
         self._browser: Optional[Browser] = None
         self._context: Optional[BrowserContext] = None
         self._page: Optional[Page] = None
+        self._temp_dir: Optional[str] = None
 
     async def start(self) -> Page:
         """Launch Chrome with persistent profile and return a page."""
         t0 = time.time()
         logger.info("[1] Starting Chrome Profile 2...")
 
-        # [2] Check Chrome process
-        chrome_running = self._is_chrome_running()
-        logger.info(f"[2] Chrome process: {'RUNNING' if chrome_running else 'NOT RUNNING'}")
-
-        if chrome_running:
-            self._log_chrome_block()
-            raise RuntimeError("Chrome is running. Close ALL Chrome windows and try again.")
-
-        # [3] Check Chrome executable
+        # [2] Check Chrome executable
         chrome_path = self.chrome_binary or self._find_chrome_executable()
         if not chrome_path or not Path(chrome_path).exists():
-            logger.error(f"[3] Chrome executable NOT FOUND")
+            logger.error(f"[2] Chrome executable NOT FOUND")
             raise RuntimeError("Chrome executable not found")
-        logger.info(f"[3] Chrome executable: {chrome_path}")
+        logger.info(f"[2] Chrome executable: {chrome_path}")
 
-        # [4] Check User Data directory
+        # [3] Check User Data directory
         user_data = self.user_data_dir or self._get_default_user_data_dir()
         if not user_data or not Path(user_data).exists():
-            logger.error(f"[4] User data directory NOT FOUND: {user_data}")
+            logger.error(f"[3] User data directory NOT FOUND: {user_data}")
             raise RuntimeError(f"Chrome user data directory not found")
-        logger.info(f"[4] User data directory: {user_data}")
+        logger.info(f"[3] User data directory: {user_data}")
 
-        # [5] Check Profile 2
-        profile_path = Path(user_data) / self.profile_name
-        logger.info(f"[5] Profile 2 exists: {'YES' if profile_path.exists() else 'NO'}")
-        if not profile_path.exists():
-            logger.warning("[5] Profile directory not found - Chrome will create it")
+        # [4] Check Profile 2
+        source_profile = Path(user_data) / self.profile_name
+        logger.info(f"[4] Profile 2 source: {source_profile}")
+        logger.info(f"[4] Profile 2 exists: {'YES' if source_profile.exists() else 'NO'}")
+        if not source_profile.exists():
+            logger.error("[4] Profile 2 does not exist - cannot use existing session")
+            raise RuntimeError(f"Profile 2 not found at {source_profile}")
 
-        # [6] Check lock files at BOTH levels
-        user_data_locked = self._is_user_data_locked(user_data)
-        profile_locked = self._is_profile_locked(user_data, self.profile_name)
-        logger.info(f"[6] User Data locked: {'YES' if user_data_locked else 'NO'}")
-        logger.info(f"[6] Profile 2 locked: {'YES' if profile_locked else 'NO'}")
+        # [5] Copy Profile 2 to temp directory
+        # This avoids the hang caused by the large User Data directory
+        self._temp_dir = tempfile.mkdtemp(prefix="fb_bot_")
+        temp_user_data = str(Path(self._temp_dir) / "User Data")
+        temp_profile = Path(temp_user_data) / self.profile_name
 
-        if user_data_locked or profile_locked:
-            self._log_chrome_block()
-            raise RuntimeError(
-                "Chrome User Data or Profile 2 is locked. "
-                "Close ALL Chrome windows, wait 5 seconds, and try again."
-            )
+        logger.info("[5] Copying Profile 2 to temp directory...")
+        logger.info(f"    Source: {source_profile}")
+        logger.info(f"    Target: {temp_profile}")
 
-        # [7] Start Playwright
-        logger.info("[7] Starting Playwright...")
+        try:
+            self._copy_profile(source_profile, temp_profile)
+            file_count = len(list(temp_profile.rglob("*")))
+            logger.info(f"[5] Profile copied: {file_count} files")
+        except Exception as e:
+            logger.error(f"[5] Failed to copy profile: {e}")
+            self._cleanup_temp()
+            raise
+
+        # [6] Start Playwright
+        logger.info("[6] Starting Playwright...")
         self._playwright = await async_playwright().start()
-        logger.info("[7] Playwright started")
+        logger.info("[6] Playwright started")
 
-        # [8] Launch persistent context
-        logger.info("[8] Launching persistent Chrome context...")
+        # [7] Launch persistent context with copied profile
+        logger.info("[7] Launching persistent Chrome context...")
         launch_start = time.time()
         try:
             self._context = await asyncio.wait_for(
                 self._playwright.chromium.launch_persistent_context(
-                    user_data_dir=user_data,
+                    user_data_dir=temp_user_data,
                     executable_path=chrome_path,
                     headless=self.headless,
                     slow_mo=self.slow_mo,
@@ -107,47 +115,40 @@ class BrowserManager:
                     locale="uk-UA",
                     timezone_id="Europe/Kyiv",
                 ),
-                timeout=20,
+                timeout=30,
             )
         except asyncio.TimeoutError:
             elapsed = time.time() - launch_start
-            logger.error(f"[8] TIMEOUT after {elapsed:.1f}s")
-            logger.error("Chrome persistent context launch timed out.")
-            logger.error("")
-            logger.error("This usually means:")
-            logger.error("  - Chrome User Data is still locked")
-            logger.error("  - Chrome process is residual (kill chrome.exe)")
-            logger.error("  - Profile directory is corrupted")
-            logger.error("")
-            logger.error("Try: close Chrome, wait 5 seconds, run again.")
-            logger.error("If still fails, restart your computer.")
+            logger.error(f"[7] TIMEOUT after {elapsed:.1f}s")
+            self._cleanup_temp()
             raise RuntimeError(
                 f"Chrome launch timed out after {elapsed:.1f}s. "
                 "Close ALL Chrome windows and try again."
             )
         except Exception as e:
             elapsed = time.time() - launch_start
-            logger.error(f"[8] FAILED after {elapsed:.1f}s: {e}")
+            logger.error(f"[7] FAILED after {elapsed:.1f}s: {e}")
+            self._cleanup_temp()
             raise
 
         elapsed = time.time() - launch_start
-        logger.info(f"[8] Context created in {elapsed:.1f}s")
+        logger.info(f"[7] Context created in {elapsed:.1f}s")
 
-        # [9] Check pages in context
+        # [8] Check pages in context
         page_count = len(self._context.pages)
-        logger.info(f"[9] Pages in context: {page_count}")
+        logger.info(f"[8] Pages in context: {page_count}")
         for idx, pg in enumerate(self._context.pages):
             logger.info(f"    PAGE {idx}: {pg.url}")
 
-        # [10] Select working page
+        # [9] Select working page
         if self._context.pages:
             self._page = self._context.pages[0]
         else:
             self._page = await self._context.new_page()
-        logger.info(f"[10] Working page URL: {self._page.url}")
+        logger.info(f"[9] Working page URL: {self._page.url}")
 
         total_time = time.time() - t0
-        logger.info(f"[11] Browser started successfully ({total_time:.1f}s)")
+        logger.info(f"[10] Browser started successfully ({total_time:.1f}s)")
         return self._page
 
     async def open_facebook(self) -> bool:
@@ -155,12 +156,12 @@ class BrowserManager:
         if not self._page:
             raise RuntimeError("Browser not started. Call start() first.")
 
-        logger.info("[12] Opening Facebook...")
+        logger.info("[11] Opening Facebook...")
         logger.info("     https://www.facebook.com/")
 
         try:
             before_url = self._page.url
-            logger.info(f"[12] Before navigation: {before_url}")
+            logger.info(f"[11] Before navigation: {before_url}")
 
             await self._page.goto(
                 "https://www.facebook.com/",
@@ -172,23 +173,23 @@ class BrowserManager:
             current_url = self._page.url
             page_title = await self._page.title()
 
-            logger.info(f"[12] After navigation: {current_url}")
-            logger.info(f"[12] Page title: {page_title}")
+            logger.info(f"[11] After navigation: {current_url}")
+            logger.info(f"[11] Page title: {page_title}")
 
             if current_url == "about:blank":
-                logger.error("[12] CRITICAL: Facebook did NOT load. Browser is on about:blank")
+                logger.error("[11] CRITICAL: Facebook did NOT load. Browser is on about:blank")
                 await self._save_debug_screenshot("navigation_failure")
                 return False
 
             if "facebook.com" in current_url:
-                logger.info(f"[12] Facebook loaded successfully. WORKING PAGE: {current_url}")
+                logger.info(f"[11] Facebook loaded successfully. WORKING PAGE: {current_url}")
                 return True
             else:
-                logger.warning(f"[12] Unexpected URL: {current_url}")
+                logger.warning(f"[11] Unexpected URL: {current_url}")
                 await self._save_debug_screenshot("unexpected_url")
                 return False
         except Exception as e:
-            logger.error(f"[12] Failed to open Facebook: {e}")
+            logger.error(f"[11] Failed to open Facebook: {e}")
             await self._save_debug_screenshot("navigation_error")
             return False
 
@@ -202,6 +203,7 @@ class BrowserManager:
             await self._playwright.stop()
             self._playwright = None
         self._page = None
+        self._cleanup_temp()
         logger.info("Browser stopped")
 
     async def get_page(self) -> Page:
@@ -223,27 +225,27 @@ class BrowserManager:
         try:
             current_url = self._page.url
             if "facebook.com" not in current_url:
-                logger.info("[13] Not on Facebook, navigating...")
+                logger.info("[12] Not on Facebook, navigating...")
                 nav_ok = await self.open_facebook()
                 if not nav_ok:
                     return False
 
-            logger.info("[13] Checking Facebook authentication...")
+            logger.info("[12] Checking Facebook authentication...")
             await asyncio.sleep(2)
 
             current_url = self._page.url
-            logger.info(f"[13] Current URL: {current_url}")
+            logger.info(f"[12] Current URL: {current_url}")
 
             # Check for login form
             login_form = await self._page.query_selector('button[data-testid="royal_login_button"]')
             if login_form:
-                logger.warning("[13] Login form detected - NOT authenticated")
+                logger.warning("[12] Login form detected - NOT authenticated")
                 return False
 
             # Check for checkpoint
             checkpoint = await self._page.query_selector('[data-testid="checkpoint_title"]')
             if checkpoint:
-                logger.warning("[13] Checkpoint detected")
+                logger.warning("[12] Checkpoint detected")
                 return False
 
             # Check for profile icon
@@ -252,14 +254,14 @@ class BrowserManager:
                         await self._page.query_selector('svg[aria-label="Your profile"]')
 
             if logged_in:
-                logger.info("[13] Facebook session: AUTHENTICATED")
+                logger.info("[12] Facebook session: AUTHENTICATED")
                 return True
 
             # Check for post creation box
             post_box = await self._page.query_selector('[aria-label="Create a post"]') or \
                        await self._page.query_selector('[aria-label="\u0421\u0442\u0432\u043e\u0440\u0438\u0442\u0438 \u0434\u043e\u043f\u0438\u0441"]')
             if post_box:
-                logger.info("[13] Facebook session: AUTHENTICATED")
+                logger.info("[12] Facebook session: AUTHENTICATED")
                 return True
 
             # Check page URL indicators
@@ -273,15 +275,15 @@ class BrowserManager:
                 for indicator in indicators:
                     element = await self._page.query_selector(indicator)
                     if element:
-                        logger.info("[13] Facebook session: AUTHENTICATED")
+                        logger.info("[12] Facebook session: AUTHENTICATED")
                         return True
 
-            logger.warning("[13] Could not confirm login status")
-            logger.info("[13] Facebook session: NOT AUTHENTICATED")
+            logger.warning("[12] Could not confirm login status")
+            logger.info("[12] Facebook session: NOT AUTHENTICATED")
             return False
 
         except Exception as e:
-            logger.error(f"[13] Error checking auth: {e}")
+            logger.error(f"[12] Error checking auth: {e}")
             return False
 
     async def wait_for_login(self, timeout_minutes: int = 10):
@@ -330,77 +332,68 @@ class BrowserManager:
         except Exception:
             pass
 
-    def _log_chrome_block(self):
-        """Log the Chrome block message."""
-        user_data = self.user_data_dir or self._get_default_user_data_dir()
-        logger.error("")
-        logger.error("=" * 60)
-        logger.error("CHROME IS RUNNING OR USER DATA IS LOCKED")
-        logger.error("")
-        logger.error("Playwright needs exclusive access to the Chrome")
-        logger.error("User Data directory. It is currently locked.")
-        logger.error("")
-        logger.error("TO FIX:")
-        logger.error("  1. Close ALL Chrome windows")
-        logger.error("  2. Wait 5 seconds")
-        logger.error("  3. Run the bot again")
-        logger.error("")
-        logger.error(f"  User data: {user_data}")
-        logger.error(f"  Profile: {self.profile_name}")
-        logger.error("=" * 60)
+    def _copy_profile(self, source: Path, target: Path):
+        """Copy Chrome profile directory, skipping large/unnecessary files."""
+        target.mkdir(parents=True, exist_ok=True)
 
-    @staticmethod
-    def _is_user_data_locked(user_data_dir: str) -> bool:
-        """Check if Chrome User Data directory has active locks."""
-        # Check for SingletonLock (strong indicator of active Chrome)
-        singleton = Path(user_data_dir) / "SingletonLock"
-        if singleton.exists():
-            return True
+        # Files/folders to skip (large, not needed)
+        skip_dirs = {"Cache", "Code Cache", "GPUCache", "Service Worker",
+                     "IndexedDB", "Local Storage", "Session Storage",
+                     "WebStorage", "blob_storage", "databases",
+                     "File System", "GCM Store", "Platform Notifications",
+                     "Sync Extension Settings", "BudgetDatabase",
+                     "heavy_ad_intervention", "safe_browsing"}
 
-        # Check for non-empty lockfile
-        lockfile = Path(user_data_dir) / "lockfile"
-        if lockfile.exists() and lockfile.stat().st_size > 0:
-            return True
+        for item in source.iterdir():
+            # Skip directories we don't need
+            if item.is_dir() and item.name in skip_dirs:
+                continue
 
-        return False
+            # Skip large files
+            if item.is_file() and item.stat().st_size > 10 * 1024 * 1024:  # > 10MB
+                continue
 
-    @staticmethod
-    def _is_profile_locked(user_data_dir: str, profile_name: str = "Profile 2") -> bool:
-        """Check if a specific Chrome profile is locked."""
-        profile_path = Path(user_data_dir) / profile_name
-        if not profile_path.exists():
-            return False
+            dst = target / item.name
+            try:
+                if item.is_dir():
+                    shutil.copytree(item, dst, dirs_exist_ok=True,
+                                    ignore=shutil.ignore_patterns(*skip_dirs))
+                else:
+                    shutil.copy2(item, dst)
+            except (PermissionError, OSError):
+                pass
 
-        for name in ["SingletonLock", "lockfile"]:
-            lock_path = profile_path / name
-            if lock_path.exists():
-                return True
+        # Always copy Network/Cookies (essential for session)
+        network_src = source / "Network"
+        if network_src.exists():
+            network_dst = target / "Network"
+            try:
+                shutil.copytree(network_src, network_dst, dirs_exist_ok=True)
+            except (PermissionError, OSError):
+                pass
 
-        return False
+        # Also copy Local State from User Data root (contains cookie encryption key)
+        local_state = source.parent.parent / "Local State"
+        if local_state.exists():
+            local_state_dst = target.parent.parent / "Local State"
+            try:
+                shutil.copy2(local_state, local_state_dst)
+            except (PermissionError, OSError):
+                pass
 
-    @staticmethod
-    def _is_chrome_running() -> bool:
-        """Check if any Chrome process is running on the system."""
-        try:
-            if sys.platform == "win32":
-                result = subprocess.run(
-                    ["tasklist", "/FI", "IMAGENAME eq chrome.exe"],
-                    capture_output=True, text=True, timeout=5
-                )
-                return "chrome.exe" in result.stdout.lower()
-            else:
-                result = subprocess.run(
-                    ["pgrep", "-f", "chrome"],
-                    capture_output=True, text=True, timeout=5
-                )
-                return result.returncode == 0
-        except Exception:
-            return False
+    def _cleanup_temp(self):
+        """Clean up temporary profile directory."""
+        if self._temp_dir and Path(self._temp_dir).exists():
+            try:
+                shutil.rmtree(self._temp_dir, ignore_errors=True)
+            except Exception:
+                pass
+            self._temp_dir = None
 
     @staticmethod
     def _find_chrome_executable() -> str:
         """Find Chrome executable on the system."""
-        import shutil
+        import shutil as _shutil
 
         possible_paths = []
 
@@ -429,7 +422,7 @@ class BrowserManager:
                 return path
 
         for name in ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"]:
-            found = shutil.which(name)
+            found = _shutil.which(name)
             if found:
                 return found
 
