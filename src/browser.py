@@ -94,20 +94,16 @@ class BrowserManager:
             raise RuntimeError(f"Profile not found: {profile_path}")
         logger.info("[1] All paths validated [OK]")
 
-        # -- [3] Check Chrome is NOT running --
-        logger.info("[2] Checking if Chrome is running...")
-        chrome_running = self._is_chrome_running()
-        logger.info(f"[2] Chrome running: {'YES' if chrome_running else 'NO'}")
+        # -- [3] Check if CDP port is available --
+        logger.info("[2] Checking CDP port 9222...")
+        port_busy = await self._is_port_in_use(CDP_PORT)
+        logger.info(f"[2] Port {CDP_PORT}: {'IN USE' if port_busy else 'FREE'}")
 
-        if chrome_running:
+        if port_busy:
             raise RuntimeError(
-                "Chrome is currently running and may lock the User Data directory.\n\n"
-                "Please CLOSE ALL Chrome windows first, then run the bot again.\n\n"
-                "Steps:\n"
-                "  1. Save any open work in Chrome\n"
-                "  2. Close ALL Chrome windows\n"
-                "  3. Wait 3 seconds\n"
-                "  4. Run the bot again"
+                f"CDP port {CDP_PORT} is already in use.\n\n"
+                "Another Chrome instance may be using this port.\n"
+                "Close other Chrome windows and try again."
             )
 
         # -- [4] Launch Chrome with remote debugging --
@@ -434,32 +430,18 @@ class BrowserManager:
     # -- Private helpers --
 
     @staticmethod
-    def _is_chrome_running() -> bool:
-        """Check if any Chrome process is running."""
+    async def _is_port_in_use(port: int) -> bool:
+        """Check if a TCP port is already in use."""
         try:
-            if sys.platform == "win32":
-                result = subprocess.run(
-                    ["tasklist", "/FI", "IMAGENAME eq chrome.exe", "/NH"],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                )
-                for line in result.stdout.strip().split("\n"):
-                    line = line.strip()
-                    if not line:
-                        continue
-                    if "chrome.exe" in line.lower():
-                        parts = line.split()
-                        if parts and parts[0].lower() == "chrome.exe":
-                            return True
-                return False
-            else:
-                result = subprocess.run(
-                    ["pgrep", "-f", "chrome"],
-                    capture_output=True,
-                    timeout=5,
-                )
-                return result.returncode == 0
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection("127.0.0.1", port),
+                timeout=2,
+            )
+            writer.close()
+            await writer.wait_closed()
+            return True
+        except (ConnectionRefusedError, OSError, asyncio.TimeoutError):
+            return False
         except Exception:
             return False
 

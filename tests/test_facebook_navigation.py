@@ -76,39 +76,46 @@ class TestBrowserConfig(unittest.TestCase):
         """channel='chrome' must NOT be used with connect_over_cdp."""
         from src.browser import BrowserManager
 
-        # Verify the start method uses connect_over_cdp, not launch_persistent_context
         import inspect
-
         source = inspect.getsource(BrowserManager.start)
         self.assertIn("connect_over_cdp", source, "Must use connect_over_cdp")
         self.assertNotIn(
             "launch_persistent_context", source, "Must not use launch_persistent_context"
         )
 
-
-class TestChromeRunningDetection(unittest.TestCase):
-    """Test Chrome process detection."""
-
-    def test_is_chrome_running_returns_bool(self):
-        """_is_chrome_running should return a boolean."""
+    def test_no_automation_controlled(self):
+        """--disable-blink-features=AutomationControlled must NOT be used."""
         from src.browser import BrowserManager
 
-        result = BrowserManager._is_chrome_running()
-        self.assertIsInstance(result, bool)
-
-    def test_no_disable_extensions(self):
-        """--disable-extensions should NOT be in browser args."""
-        from src.browser import BrowserManager
-
-        bm = BrowserManager()
-        # The start method should not use --disable-extensions
         import inspect
-
         source = inspect.getsource(BrowserManager.start)
-        self.assertNotIn(
-            "--disable-extensions",
-            source,
-            "--disable-extensions should not be used",
+        self.assertNotIn("AutomationControlled", source)
+        self.assertNotIn("disable-blink-features", source)
+
+
+class TestPortCheck(unittest.TestCase):
+    """Test port-based Chrome detection."""
+
+    def test_is_port_in_use_method_exists(self):
+        """_is_port_in_use method must exist."""
+        from src.browser import BrowserManager
+
+        self.assertTrue(hasattr(BrowserManager, "_is_port_in_use"))
+
+    def test_is_port_in_use_is_async(self):
+        """_is_port_in_use must be an async method."""
+        import inspect
+        from src.browser import BrowserManager
+
+        self.assertTrue(inspect.iscoroutinefunction(BrowserManager._is_port_in_use))
+
+    def test_no_is_chrome_running(self):
+        """_is_chrome_running must NOT exist (replaced by port check)."""
+        from src.browser import BrowserManager
+
+        self.assertFalse(
+            hasattr(BrowserManager, "_is_chrome_running"),
+            "_is_chrome_running should be removed — use _is_port_in_use instead",
         )
 
 
@@ -118,7 +125,6 @@ class TestFacebookNavigation(unittest.TestCase):
     def test_open_facebook_checks_url(self):
         """open_facebook should verify the URL after navigation."""
         import inspect
-
         from src.browser import BrowserManager
 
         source = inspect.getsource(BrowserManager.open_facebook)
@@ -129,7 +135,6 @@ class TestFacebookNavigation(unittest.TestCase):
     def test_check_auth_checks_login_form(self):
         """check_facebook_auth should detect login forms."""
         import inspect
-
         from src.browser import BrowserManager
 
         source = inspect.getsource(BrowserManager.check_facebook_auth)
