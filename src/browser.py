@@ -96,10 +96,25 @@ class BrowserManager:
         logger.info("[1] All paths validated [OK]")
 
         # -- [2] Create junction to original User Data --
-        junction_path = Path(JUNCTION_DIR).resolve()
-        logger.info(f"[2] Creating junction to original User Data...")
-        logger.info(f"    Junction: {junction_path}")
-        logger.info(f"    Target:   {user_data}")
+        # IMPORTANT: Do NOT use .resolve() — it follows the junction and returns the target.
+        # Use the literal path string so Chrome sees it as "non-default".
+        project_root = Path(__file__).resolve().parent.parent  # facebookpost/
+        junction_path = project_root / JUNCTION_DIR
+        junction_path_str = str(junction_path)  # keep as string, do NOT resolve
+        target_path_str = str(Path(user_data).resolve())
+
+        logger.info("[2] Creating junction to original User Data...")
+        logger.info(f"    Junction: {junction_path_str}")
+        logger.info(f"    Target:   {target_path_str}")
+
+        # CRITICAL: junction path MUST differ from target
+        if junction_path_str == target_path_str or junction_path_str == user_data:
+            raise RuntimeError(
+                f"CRITICAL: Junction path and target are identical!\n"
+                f"  Junction: {junction_path_str}\n"
+                f"  Target:   {target_path_str}\n"
+                f"Refusing to continue."
+            )
 
         # Remove old junction if exists
         if junction_path.exists():
@@ -108,9 +123,14 @@ class BrowserManager:
             except Exception:
                 pass
 
+        # Remove stale directory if it exists (not a junction)
+        if junction_path.is_dir() and not junction_path.is_symlink():
+            import shutil
+            shutil.rmtree(junction_path, ignore_errors=True)
+
         # Create junction using Windows mklink /J
         result = subprocess.run(
-            ["cmd", "/c", "mklink", "/J", str(junction_path), user_data],
+            ["cmd", "/c", "mklink", "/J", junction_path_str, user_data],
             capture_output=True,
             text=True,
             timeout=10,
@@ -118,25 +138,30 @@ class BrowserManager:
 
         if not junction_path.exists():
             raise RuntimeError(
-                f"Failed to create junction from {junction_path} to {user_data}\n"
+                f"Failed to create junction from {junction_path_str} to {user_data}\n"
                 f"cmd output: {result.stdout} {result.stderr}"
             )
 
         # Verify junction works
         entries = list(junction_path.iterdir())
+        resolved_target = str(junction_path.resolve())
         logger.info(f"[2] Junction created: {len(entries)} entries")
+        logger.info(f"[2] Resolved target: {resolved_target}")
         logger.info(f"[2] Profile 2 accessible: {(junction_path / self.profile_name).exists()}")
+        if resolved_target != target_path_str:
+            logger.warning(f"[2] Junction resolves to different path! Expected: {target_path_str}")
 
         # -- [3] Launch Chrome with junction --
         logger.info("[3] Launching system Chrome...")
-        logger.info(f"    --remote-debugging-port={CDP_PORT}")
-        logger.info(f"    --user-data-dir={junction_path}")
-        logger.info(f"    --profile-directory={self.profile_name}")
+        logger.info(f"    Chrome:          {chrome_path}")
+        logger.info(f"    --user-data-dir={junction_path_str}")
+        logger.info(f"    --profile-dir=  {self.profile_name}")
+        logger.info(f"    --debug-port=   {CDP_PORT}")
 
         chrome_args = [
             chrome_path,
             f"--remote-debugging-port={CDP_PORT}",
-            f"--user-data-dir={junction_path}",
+            f"--user-data-dir={junction_path_str}",
             f"--profile-directory={self.profile_name}",
             "--no-first-run",
             "--no-default-browser-check",
