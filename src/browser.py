@@ -12,6 +12,7 @@ The bot launches its own Chrome instance with the user's profile.
 """
 
 import asyncio
+import json
 import subprocess
 import sys
 import time
@@ -59,11 +60,13 @@ class BrowserManager:
           [3] Check Chrome is NOT running (User Data would be locked)
           [4] Launch Chrome with --remote-debugging-port
           [5] Connect Playwright via CDP
-          [6] Get working page from context
+          [6] Find and select the correct working page
+          [7] Navigate to Facebook
+          [8] Verify Facebook loaded
         """
         t0 = time.time()
 
-        # ── [1] Resolve paths ──────────────────────────────────────────
+        # -- [1] Resolve paths --
         chrome_path = self.chrome_binary or self._find_chrome_executable()
         user_data = self.user_data_dir or self._get_default_user_data_dir()
         profile_path = Path(user_data) / self.profile_name
@@ -79,7 +82,7 @@ class BrowserManager:
         logger.info(f"  CDP port:       {CDP_PORT}")
         logger.info("=" * 60)
 
-        # ── [2] Validate paths ──────────────────────────────────────────
+        # -- [2] Validate paths --
         logger.info("[1] Validating paths...")
 
         if not Path(chrome_path).exists():
@@ -92,14 +95,11 @@ class BrowserManager:
             raise RuntimeError(f"User Data directory not found: {user_data}")
 
         if not profile_path.exists():
-            raise RuntimeError(
-                f"Profile not found: {profile_path}\n"
-                f"Available profiles in {user_data}:"
-            )
+            raise RuntimeError(f"Profile not found: {profile_path}")
 
         logger.info("[1] All paths validated [OK]")
 
-        # ── [3] Check Chrome is NOT running ─────────────────────────────
+        # -- [3] Check Chrome is NOT running --
         logger.info("[2] Checking if Chrome is running...")
         chrome_running = self._is_chrome_running()
         logger.info(f"[2] Chrome running: {'YES' if chrome_running else 'NO'}")
@@ -108,9 +108,6 @@ class BrowserManager:
             raise RuntimeError(
                 "Chrome is currently running and may lock the User Data directory.\n\n"
                 "Please CLOSE ALL Chrome windows first, then run the bot again.\n\n"
-                "Why: Chrome locks the entire User Data directory when running.\n"
-                "The bot needs to launch its own Chrome instance with Profile 2.\n"
-                "Both Chrome instances cannot share the same User Data directory.\n\n"
                 "Steps:\n"
                 "  1. Save any open work in Chrome\n"
                 "  2. Close ALL Chrome windows\n"
@@ -118,11 +115,15 @@ class BrowserManager:
                 "  4. Run the bot again"
             )
 
-        # ── [4] Launch Chrome with remote debugging ─────────────────────
+        # -- [4] Launch Chrome with remote debugging --
+        # DO NOT pass any URL (not even about:blank) as initial page.
+        # Chrome will open its default new tab page.
+        # We will navigate to Facebook explicitly after connecting.
         logger.info("[3] Launching system Chrome...")
         logger.info(f"    chrome.exe --remote-debugging-port={CDP_PORT}")
         logger.info(f"    --user-data-dir={user_data}")
         logger.info(f"    --profile-directory={self.profile_name}")
+        logger.info("    (no initial URL — will navigate to Facebook after connecting)")
 
         chrome_args = [
             chrome_path,
@@ -133,10 +134,8 @@ class BrowserManager:
             "--no-default-browser-check",
             "--disable-blink-features=AutomationControlled",
         ]
-
-        # Don't open about:blank — let Chrome open its default start page
-        # We'll navigate to Facebook explicitly after connecting
-        chrome_args.append("about:blank")
+        # DO NOT add "about:blank" or any URL here.
+        # Chrome opens its default new tab. We navigate to Facebook after connecting.
 
         try:
             self._chrome_process = subprocess.Popen(
@@ -149,7 +148,7 @@ class BrowserManager:
 
         logger.info(f"[3] Chrome started (PID: {self._chrome_process.pid})")
 
-        # Wait for Chrome to fully start and open debugging port
+        # Wait for debugging port
         logger.info("[4] Waiting for Chrome debugging port...")
         port_ready = await self._wait_for_port(CDP_PORT, timeout=15)
         if not port_ready:
@@ -159,7 +158,7 @@ class BrowserManager:
             )
         logger.info(f"[4] Debugging port {CDP_PORT} ready [OK]")
 
-        # ── [5] Connect Playwright via CDP ──────────────────────────────
+        # -- [5] Connect Playwright via CDP --
         logger.info("[5] Connecting Playwright to Chrome via CDP...")
         self._playwright = await async_playwright().start()
 
@@ -175,34 +174,41 @@ class BrowserManager:
 
         logger.info("[5] Connected to Chrome via CDP [OK]")
 
-        # ── [6] Get working page ────────────────────────────────────────
-        logger.info("[6] Selecting working page...")
-        contexts = self._browser.contexts
+        # -- [6] List ALL pages across ALL contexts --
+        logger.info("[6] Listing all pages...")
+        all_pages = []
+        for ctx_idx, ctx in enumerate(self._browser.contexts):
+            for pg_idx, pg in enumerate(ctx.pages):
+                all_pages.append((ctx_idx, pg_idx, pg))
+                logger.info(f"    Context {ctx_idx}, Page {pg_idx}: {pg.url}")
 
-        if contexts:
-            self._context = contexts[0]
-            pages = self._context.pages
-            logger.info(f"[6] Pages in context: {len(pages)}")
-            for idx, pg in enumerate(pages):
-                logger.info(f"    PAGE {idx}: {pg.url}")
-
-            if pages:
-                self._page = pages[0]
-            else:
-                self._page = await self._context.new_page()
-        else:
-            self._context = await self._browser.new_context()
+        if not all_pages:
+            logger.info("[6] No pages found. Creating new page...")
+            self._context = self._browser.contexts[0] if self._browser.contexts else await self._browser.new_context()
             self._page = await self._context.new_page()
+        else:
+            # Select the first page as working page
+            ctx_idx, pg_idx, self._page = all_pages[0]
+            self._context = self._browser.contexts[ctx_idx]
 
-        logger.info(f"[6] Working page URL: {self._page.url}")
+        logger.info(f"[6] Selected working page: Context {ctx_idx}, Page {pg_idx}")
+        logger.info(f"    URL: {self._page.url}")
 
         total_time = time.time() - t0
-        logger.info(f"[6] Browser started successfully ({total_time:.1f}s)")
+        logger.info(f"[6] Browser connected ({total_time:.1f}s)")
 
         return self._page
 
     async def open_facebook(self) -> bool:
-        """Navigate to Facebook homepage and verify it loads."""
+        """
+        Navigate to Facebook homepage and verify it loads.
+
+        Uses multiple verification methods:
+        1. page.url after navigation
+        2. window.location.href via JavaScript evaluation
+        3. Page title check
+        4. Screenshot for visual confirmation
+        """
         if not self._page:
             raise RuntimeError("Browser not started. Call start() first.")
 
@@ -210,35 +216,65 @@ class BrowserManager:
         logger.info("     https://www.facebook.com/")
 
         try:
-            logger.info(f"[7] Current URL before: {self._page.url}")
+            before_url = self._page.url
+            logger.info(f"[7] URL before navigation: {before_url}")
 
+            # Navigate to Facebook
             await self._page.goto(
                 "https://www.facebook.com/",
-                wait_until="domcontentloaded",
-                timeout=30000,
+                wait_until="load",
+                timeout=60000,
             )
-            await asyncio.sleep(3)
 
-            current_url = self._page.url
+            # Wait for page to fully render
+            try:
+                await self._page.wait_for_load_state("networkidle", timeout=15000)
+            except Exception:
+                logger.info("[7] networkidle timeout — proceeding with current state")
+
+            # Extra wait for dynamic content
+            await asyncio.sleep(5)
+
+            # -- Verify navigation --
+            page_url = self._page.url
+            doc_url = await self._page.evaluate("window.location.href")
             page_title = await self._page.title()
 
-            logger.info(f"[7] After navigation: {current_url}")
-            logger.info(f"[7] Page title: {page_title}")
+            logger.info("[7] Verification results:")
+            logger.info(f"     page.url:          {page_url}")
+            logger.info(f"     document.location: {doc_url}")
+            logger.info(f"     page title:        {page_title}")
 
-            if current_url == "about:blank":
+            # Check all pages in context after navigation
+            logger.info("[7] All pages after Facebook navigation:")
+            for idx, pg in enumerate(self._context.pages):
+                logger.info(f"     [{idx}] {pg.url}")
+
+            # Take screenshot for visual confirmation
+            screenshot_path = "logs/facebook_after_navigation.png"
+            try:
+                Path("logs").mkdir(exist_ok=True)
+                await self._page.screenshot(path=screenshot_path)
+                logger.info(f"[7] Screenshot saved: {screenshot_path}")
+            except Exception as e:
+                logger.warning(f"[7] Screenshot failed: {e}")
+
+            # -- Critical checks --
+            if page_url == "about:blank" and doc_url == "about:blank":
                 logger.error("[7] CRITICAL NAVIGATION ERROR:")
                 logger.error("     Expected: https://www.facebook.com/")
-                logger.error("     Actual:   about:blank")
-                logger.error("     Facebook was NOT opened.")
-                logger.error("     Stopping workflow.")
+                logger.error(f"     page.url: {page_url}")
+                logger.error(f"     document.location.href: {doc_url}")
+                logger.error("     Facebook was NOT opened. Stopping workflow.")
                 return False
 
-            if "facebook.com" in current_url:
+            if "facebook.com" in page_url or "facebook.com" in doc_url:
                 logger.info("[7] Facebook loaded successfully.")
-                logger.info(f"     WORKING PAGE: {current_url}")
+                logger.info(f"     WORKING PAGE: {page_url}")
                 return True
             else:
-                logger.warning(f"[7] Unexpected URL after Facebook navigation: {current_url}")
+                logger.warning(f"[7] Unexpected URL: {page_url}")
+                logger.warning(f"     Document URL: {doc_url}")
                 return False
 
         except Exception as e:
@@ -295,7 +331,9 @@ class BrowserManager:
             await asyncio.sleep(2)
 
             current_url = self._page.url
-            logger.info(f"[8] Current URL: {current_url}")
+            doc_url = await self._page.evaluate("window.location.href")
+            logger.info(f"[8] page.url: {current_url}")
+            logger.info(f"[8] document.location.href: {doc_url}")
 
             # Check for login form indicators
             login_selectors = [
@@ -349,13 +387,13 @@ class BrowserManager:
                 except Exception:
                     continue
 
-            # URL-based fallback: on facebook.com, not login/checkpoint
+            # URL-based fallback
+            url_to_check = doc_url if doc_url else current_url
             if (
-                "facebook.com" in current_url
-                and "/login" not in current_url
-                and "/checkpoint" not in current_url
+                "facebook.com" in url_to_check
+                and "/login" not in url_to_check
+                and "/checkpoint" not in url_to_check
             ):
-                # If we're on a facebook.com page that isn't login, probably authenticated
                 logger.info("[8] Facebook session: AUTHENTICATED (URL-based check)")
                 return True
 
@@ -400,7 +438,7 @@ class BrowserManager:
         logger.error(f"Login timeout after {timeout_minutes} minutes")
         return False
 
-    # ── Private helpers ─────────────────────────────────────────────────
+    # -- Private helpers --
 
     @staticmethod
     def _is_chrome_running() -> bool:
@@ -413,13 +451,11 @@ class BrowserManager:
                     text=True,
                     timeout=5,
                 )
-                # Parse output lines — only count actual process lines
                 for line in result.stdout.strip().split("\n"):
                     line = line.strip()
                     if not line:
                         continue
                     if "chrome.exe" in line.lower():
-                        # Verify it's a real process line by checking for PID (digits)
                         parts = line.split()
                         if parts and parts[0].lower() == "chrome.exe":
                             return True
