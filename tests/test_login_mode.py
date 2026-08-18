@@ -182,6 +182,7 @@ class TestModeRouting:
             with patch("src.main.asyncio.run"):
                 with patch("argparse.ArgumentParser.parse_args") as mock_args:
                     mock_args.return_value = argparse.Namespace(
-                        mode="DRY_RUN", config="config.yaml"
+                        mode="DRY_RUN", config="config.yaml",
+                        limit_groups=0
                     )
                     main()

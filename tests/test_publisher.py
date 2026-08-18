@@ -103,10 +103,12 @@ class TestDialogScoping:
     def test_publisher_has_dialog_scoped_methods(self):
         """Publisher must have dialog-scoped methods for text, photos, videos, publish."""
         from src.publisher import Publisher
-        assert hasattr(Publisher, "_type_post_text_in_dialog")
+        assert hasattr(Publisher, "_enter_text")
         assert hasattr(Publisher, "_attach_photos_in_dialog")
         assert hasattr(Publisher, "_attach_videos_in_dialog")
         assert hasattr(Publisher, "_click_post_button_in_dialog")
+        assert hasattr(Publisher, "_attach_media")
+        assert hasattr(Publisher, "_open_composer")
 
     def test_old_page_level_methods_removed(self):
         """Old page-level methods should be removed."""

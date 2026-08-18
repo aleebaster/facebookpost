@@ -155,7 +155,7 @@ async def run_login_mode(config_path: str = "config.yaml"):
         await browser.stop()
 
 
-async def run_bot(mode: str = "DRY_RUN", config_path: str = "config.yaml"):
+async def run_bot(mode: str = "DRY_RUN", config_path: str = "config.yaml", limit_groups: int = 0):
     """Main bot execution loop."""
     # Load configuration
     load_dotenv()
@@ -267,11 +267,18 @@ async def run_bot(mode: str = "DRY_RUN", config_path: str = "config.yaml"):
 
         # Main publication loop
         max_failures = timing_config.get("max_consecutive_failures", 3)
-        min_interval = timing_config.get("min_post_interval", 180)
-        max_interval = timing_config.get("max_post_interval", 420)
+        min_interval = timing_config.get("min_post_interval", 60)
+        max_interval = timing_config.get("max_post_interval", 180)
 
         total = group_manager.count
+        if limit_groups > 0:
+            total = min(total, limit_groups)
+            logger.info(f"Limiting to {total} group(s) (--limit-groups)")
+
         for i, group_url in enumerate(group_manager):
+            if limit_groups > 0 and i >= limit_groups:
+                break
+
             group_num = i + 1
 
             # Log current working page before each group
@@ -290,6 +297,11 @@ async def run_bot(mode: str = "DRY_RUN", config_path: str = "config.yaml"):
                     f"Too many consecutive failures ({publisher.consecutive_failures}). "
                     "Stopping to protect your account."
                 )
+                break
+
+            # Stop if limit reached
+            if limit_groups > 0 and group_num >= limit_groups:
+                logger.info(f"Reached --limit-groups={limit_groups}. Stopping.")
                 break
 
             # Publish to group
@@ -312,6 +324,14 @@ async def run_bot(mode: str = "DRY_RUN", config_path: str = "config.yaml"):
             logger.info(f"Result: {label} {result['status']}")
             if result["error"]:
                 logger.info(f"Detail: {result['error']}")
+
+            # Check if we can proceed to next group
+            composer_state = result.get("composer_state")
+            from src.publisher import ComposerState
+            if not publisher.can_proceed_to_next_group(composer_state, mode):
+                logger.error(f"Composer state: {composer_state.value if composer_state else 'UNKNOWN'}")
+                logger.error("Cannot proceed to next group. Stopping workflow.")
+                break
 
             # Log current page after group processing
             logger.info(f"CURRENT WORKING PAGE: {page.url}")
@@ -365,13 +385,19 @@ def main():
         default="config.yaml",
         help="Path to config file (default: config.yaml)",
     )
+    parser.add_argument(
+        "--limit-groups",
+        type=int,
+        default=0,
+        help="Limit number of groups to process (0 = all)",
+    )
 
     args = parser.parse_args()
 
     if args.mode == "LOGIN":
         asyncio.run(run_login_mode(config_path=args.config))
     else:
-        asyncio.run(run_bot(mode=args.mode, config_path=args.config))
+        asyncio.run(run_bot(mode=args.mode, config_path=args.config, limit_groups=args.limit_groups))
 
 
 if __name__ == "__main__":
