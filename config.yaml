@@ -27,9 +27,11 @@ browser:
 
 # Timing configuration (seconds)
 timing:
-  # Pause between publishing to different groups
-  min_post_interval: 180
-  max_post_interval: 420
+  # Pause between PUBLISHING to different groups (seconds)
+  # Only applied AFTER successful publication. Skipped in DRY_RUN.
+  # Random value chosen between min and max for each interval.
+  min_post_interval: 60
+  max_post_interval: 180
 
   # Pause after page loads
   page_load_delay: 5

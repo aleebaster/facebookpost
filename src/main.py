@@ -316,11 +316,19 @@ async def run_bot(mode: str = "DRY_RUN", config_path: str = "config.yaml"):
             # Log current page after group processing
             logger.info(f"CURRENT WORKING PAGE: {page.url}")
 
-            # Pause between groups (except after last group)
-            if i < group_manager.count - 1:
+            # Pause between groups ONLY after successful publication
+            # DRY_RUN skips the wait entirely
+            if (
+                i < group_manager.count - 1
+                and result["status"] == "SUCCESS"
+                and mode != "DRY_RUN"
+            ):
                 pause = random.randint(min_interval, max_interval)
-                logger.info(f"Pausing {pause}s before next group...")
+                logger.info(f"Publication SUCCESS — waiting {pause}s before next group...")
                 await asyncio.sleep(pause)
+                logger.info("Interval complete. Proceeding to next group.")
+            elif mode == "DRY_RUN":
+                logger.info("Pausing: SKIPPED (DRY_RUN)")
 
     except KeyboardInterrupt:
         logger.info("Bot stopped by user (Ctrl+C)")

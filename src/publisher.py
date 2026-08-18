@@ -285,8 +285,44 @@ class Publisher:
         """AUTO mode - publish automatically."""
         return await self._actual_publish(group_url, group_name, text, result)
 
+    async def _find_composer_dialog(self):
+        """Find and return the active composer dialog locator.
+
+        After clicking 'Create a post', Facebook opens a modal dialog.
+        We must scope ALL subsequent actions to this dialog to avoid
+        scrolling the feed or interacting with elements outside the composer.
+        """
+        dialog_selectors = [
+            '[role="dialog"]',
+            '[aria-label="Create a post"]',
+            '[aria-label="\u0421\u0442\u0432\u043e\u0440\u0438\u0442\u0438 \u0434\u043e\u043f\u0438\u0441"]',
+        ]
+
+        for selector in dialog_selectors:
+            try:
+                dialogs = self.page.locator(selector)
+                count = await dialogs.count()
+                if count > 0:
+                    # Use the last visible dialog (most recent one opened)
+                    dialog = dialogs.last
+                    is_visible = await dialog.is_visible()
+                    if is_visible:
+                        logger.info(f"Post composer dialog detected: YES")
+                        logger.info(f"Dialog count: {count}")
+                        logger.info(f"Dialog selector: {selector}")
+                        return dialog
+            except Exception:
+                continue
+
+        logger.warning("No post composer dialog found")
+        return None
+
     async def _actual_publish(self, group_url, group_name, text, result):
-        """Actually perform the publication to Facebook."""
+        """Actually perform the publication to Facebook.
+
+        All post-composer actions (text, photo, video, publish) are scoped
+        to the dialog locator to prevent feed scrolling.
+        """
         try:
             # Click "Create a post" button
             clicked = await self.fb.click_create_post()
@@ -318,11 +354,15 @@ class Publisher:
                 )
                 return result
 
-            # Type the post text
-            text_typed = await self._type_post_text(text)
-            if not text_typed:
+            # ========================================================
+            # Find the active composer dialog.
+            # From this point, ALL locators are scoped to the dialog.
+            # No page-level scrolling or feed interaction is allowed.
+            # ========================================================
+            dialog = await self._find_composer_dialog()
+            if dialog is None:
                 result["status"] = PublicationStatus.FAILED.value
-                result["error"] = "Could not type post text"
+                result["error"] = "Post composer dialog not found after clicking create"
                 self.db.log_publication(
                     group_url=group_url,
                     group_name=group_name,
@@ -331,16 +371,51 @@ class Publisher:
                 )
                 return result
 
-            # Attach media if available
+            logger.info("")
+            logger.info("POST COMPOSER")
+            logger.info("-" * 40)
+            logger.info(f"Dialog detected: YES")
+
+            # Verify dialog is still visible before each action
+            if not await dialog.is_visible():
+                result["status"] = PublicationStatus.FAILED.value
+                result["error"] = "Post composer dialog disappeared"
+                logger.error("Post composer dialog disappeared unexpectedly.")
+                logger.error("Stopping publication workflow.")
+                return result
+
+            # Type the post text — scoped to dialog
+            text_typed = await self._type_post_text_in_dialog(dialog, text)
+            if not text_typed:
+                result["status"] = PublicationStatus.FAILED.value
+                result["error"] = "Could not type post text in composer"
+                self.db.log_publication(
+                    group_url=group_url,
+                    group_name=group_name,
+                    status=PublicationStatus.FAILED.value,
+                    error_message=result["error"],
+                )
+                return result
+
+            # Attach media — scoped to dialog
             photos_attached = False
             if self.media.has_photos:
-                photos_attached = await self._attach_photos()
+                photos_attached = await self._attach_photos_in_dialog(dialog)
 
             videos_attached = False
             if self.media.has_videos:
-                videos_attached = await self._attach_videos()
+                videos_attached = await self._attach_videos_in_dialog(dialog)
+
+            logger.info("-" * 40)
 
             await asyncio.sleep(self.timing.get("form_delay", 3))
+
+            # Verify dialog is still visible before final check
+            if not await dialog.is_visible():
+                result["status"] = PublicationStatus.FAILED.value
+                result["error"] = "Post composer dialog disappeared before submit"
+                logger.error("Post composer dialog disappeared before submit.")
+                return result
 
             # Final safety check before posting
             safety = await self.fb.check_safety()
@@ -355,11 +430,11 @@ class Publisher:
                 )
                 return result
 
-            # Click Post button
-            posted = await self._click_post_button()
+            # Click Post button — scoped to dialog
+            posted = await self._click_post_button_in_dialog(dialog)
             if not posted:
                 result["status"] = PublicationStatus.FAILED.value
-                result["error"] = "Could not click 'Post' button"
+                result["error"] = "Could not click 'Post' button in composer"
                 self.db.log_publication(
                     group_url=group_url,
                     group_name=group_name,
@@ -367,6 +442,8 @@ class Publisher:
                     error_message=result["error"],
                 )
                 return result
+
+            logger.info("Ready to publish: YES")
 
             # Wait and check result
             await asyncio.sleep(self.timing.get("submit_delay", 5))
@@ -400,7 +477,7 @@ class Publisher:
                 post_url=result["post_url"],
             )
 
-            logger.info(f"Successfully published to: {group_name or group_url}")
+            logger.info(f"Publication SUCCESS — {group_name or group_url}")
             return result
 
         except Exception as e:
@@ -416,8 +493,9 @@ class Publisher:
             )
             return result
 
-    async def _type_post_text(self, text: str) -> bool:
-        """Type text into the post creation form."""
+    async def _type_post_text_in_dialog(self, dialog, text: str) -> bool:
+        """Type text into the post creation form inside the dialog."""
+        # Text input selectors — scoped to dialog
         selectors = [
             'div[role="textbox"][contenteditable="true"]',
             'div[contenteditable="true"][data-lexical-editor="true"]',
@@ -428,21 +506,24 @@ class Publisher:
 
         for selector in selectors:
             try:
-                element = await self.page.wait_for_selector(selector, timeout=5000)
-                if element:
+                element = dialog.locator(selector).first
+                count = await dialog.locator(selector).count()
+                if count > 0 and await element.is_visible():
                     await element.click()
                     await asyncio.sleep(0.5)
+                    # Use keyboard.type to avoid page-level scrolling
                     await self.page.keyboard.type(text, delay=10)
-                    logger.info("Post text typed successfully")
+                    logger.info(f"Text field found: OK")
+                    logger.info(f"Text entry: SUCCESS")
                     return True
             except Exception:
                 continue
 
-        logger.warning("Could not find post text input field")
+        logger.warning("Could not find post text input field inside dialog")
         return False
 
-    async def _attach_photos(self) -> bool:
-        """Attach photos to the post."""
+    async def _attach_photos_in_dialog(self, dialog) -> bool:
+        """Attach photos to the post inside the dialog."""
         try:
             photo_selectors = [
                 'input[accept*="image"]',
@@ -454,24 +535,40 @@ class Publisher:
 
             for selector in photo_selectors:
                 try:
-                    element = await self.page.query_selector(selector)
-                    if element:
+                    elements = dialog.locator(selector)
+                    count = await elements.count()
+                    if count > 0:
+                        element = elements.first
                         for photo_url in self.media.photos:
                             await element.set_input_files(photo_url)
                             await asyncio.sleep(2)
-                        logger.info(f"Attached {len(self.media.photos)} photo(s)")
+                        logger.info(f"Photos attached: {len(self.media.photos)}")
                         return True
                 except Exception:
                     continue
 
-            logger.warning("Could not find photo upload input")
+            # Fallback: search page for file inputs (hidden ones may be outside dialog)
+            try:
+                page_inputs = self.page.locator('input[type="file"][accept*="image"]')
+                count = await page_inputs.count()
+                if count > 0:
+                    element = page_inputs.first
+                    for photo_url in self.media.photos:
+                        await element.set_input_files(photo_url)
+                        await asyncio.sleep(2)
+                    logger.info(f"Photos attached (page-level fallback): {len(self.media.photos)}")
+                    return True
+            except Exception:
+                pass
+
+            logger.warning("Could not find photo upload input in dialog")
             return False
         except Exception as e:
             logger.error(f"Error attaching photos: {e}")
             return False
 
-    async def _attach_videos(self) -> bool:
-        """Attach videos to the post."""
+    async def _attach_videos_in_dialog(self, dialog) -> bool:
+        """Attach videos to the post inside the dialog."""
         try:
             video_selectors = [
                 'input[accept*="video"]',
@@ -482,24 +579,40 @@ class Publisher:
 
             for selector in video_selectors:
                 try:
-                    element = await self.page.query_selector(selector)
-                    if element:
+                    elements = dialog.locator(selector)
+                    count = await elements.count()
+                    if count > 0:
+                        element = elements.first
                         for video_url in self.media.videos:
                             await element.set_input_files(video_url)
                             await asyncio.sleep(3)
-                        logger.info(f"Attached {len(self.media.videos)} video(s)")
+                        logger.info(f"Videos attached: {len(self.media.videos)}")
                         return True
                 except Exception:
                     continue
 
-            logger.warning("Could not find video upload input")
+            # Fallback: search page for file inputs
+            try:
+                page_inputs = self.page.locator('input[type="file"][accept*="video"]')
+                count = await page_inputs.count()
+                if count > 0:
+                    element = page_inputs.first
+                    for video_url in self.media.videos:
+                        await element.set_input_files(video_url)
+                        await asyncio.sleep(3)
+                    logger.info(f"Videos attached (page-level fallback): {len(self.media.videos)}")
+                    return True
+            except Exception:
+                pass
+
+            logger.warning("Could not find video upload input in dialog")
             return False
         except Exception as e:
             logger.error(f"Error attaching videos: {e}")
             return False
 
-    async def _click_post_button(self) -> bool:
-        """Click the final 'Post' / 'Publish' button."""
+    async def _click_post_button_in_dialog(self, dialog) -> bool:
+        """Click the final 'Post' / 'Publish' button inside the dialog."""
         post_selectors = [
             'div[role="button"]:has-text("Post")',
             'div[role="button"]:has-text("\u041e\u043f\u0443\u0431\u043b\u0456\u043a\u0443\u0432\u0430\u0442\u0438")',
@@ -512,20 +625,38 @@ class Publisher:
 
         for selector in post_selectors:
             try:
-                element = await self.page.query_selector(selector)
-                if element:
-                    disabled = await element.get_attribute("aria-disabled")
-                    if disabled == "true":
-                        logger.warning("Post button is disabled")
-                        return False
+                elements = dialog.locator(selector)
+                count = await elements.count()
+                if count > 0:
+                    # Find the publish button (not other buttons in the dialog)
+                    for idx in range(count):
+                        element = elements.nth(idx)
+                        if await element.is_visible():
+                            disabled = await element.get_attribute("aria-disabled")
+                            if disabled == "true":
+                                logger.warning("Post button is disabled")
+                                return False
 
-                    await element.click()
-                    logger.info("Post button clicked")
-                    return True
+                            await element.click()
+                            logger.info("Publish clicked")
+                            return True
             except Exception:
                 continue
 
-        logger.warning("Could not find Post button")
+        # Fallback: try page-level search for publish button
+        try:
+            page_buttons = self.page.locator('[aria-label="\u041e\u043f\u0443\u0431\u043b\u0456\u043a\u0443\u0432\u0430\u0442\u0438"]')
+            count = await page_buttons.count()
+            if count > 0:
+                element = page_buttons.first
+                if await element.is_visible():
+                    await element.click()
+                    logger.info("Publish clicked (page-level fallback)")
+                    return True
+        except Exception:
+            pass
+
+        logger.warning("Could not find Post button in dialog")
         return False
 
     def _map_safety_state(self, state: FacebookState) -> str:
