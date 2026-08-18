@@ -210,7 +210,7 @@ class Publisher:
         logger.info("-" * 30)
 
         while True:
-            response = input("\n✅ Publish? (y/n/quit): ").strip().lower()
+            response = input("\nPublish? (y/n/quit): ").strip().lower()
             if response in ("y", "yes"):
                 break
             elif response in ("n", "no"):
@@ -352,7 +352,7 @@ class Publisher:
                 post_url=result["post_url"],
             )
 
-            logger.info(f"✅ Successfully published to: {group_name or group_url}")
+            logger.info(f"Successfully published to: {group_name or group_url}")
             return result
 
         except Exception as e:

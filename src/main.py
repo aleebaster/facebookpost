@@ -4,6 +4,7 @@ Orchestrates the full publication workflow.
 """
 
 import asyncio
+import random
 import sys
 import time
 from pathlib import Path
@@ -90,7 +91,7 @@ async def run_bot(mode: str = "DRY_RUN", config_path: str = "config.yaml"):
     # Start browser
     browser = BrowserManager(
         user_data_dir=browser_config.get("user_data_dir", ""),
-        profile_name=browser_config.get("profile_name", "Default"),
+        profile_name=browser_config.get("profile_name", "Profile 2"),
         chrome_binary=browser_config.get("chrome_binary", ""),
         headless=browser_config.get("headless", False),
         slow_mo=browser_config.get("slow_mo", 100),
@@ -100,7 +101,6 @@ async def run_bot(mode: str = "DRY_RUN", config_path: str = "config.yaml"):
         page = await browser.start()
 
         # Check if logged in
-        logger.info("Checking Facebook authentication...")
         is_logged_in = await browser.check_facebook_auth()
 
         if not is_logged_in:
@@ -112,11 +112,14 @@ async def run_bot(mode: str = "DRY_RUN", config_path: str = "config.yaml"):
                     logger.error("Login timeout. Exiting.")
                     return
             else:
-                logger.info("Please log into Facebook and restart the bot.")
-                logger.info("For MANUAL_APPROVAL mode, you can log in during the session.")
+                logger.error(
+                    "Facebook session is not authenticated in Chrome Profile 2.\n"
+                    "Please log into Facebook manually in Chrome Profile 2 "
+                    "and run the bot again."
+                )
                 return
 
-        logger.info("Facebook authentication confirmed ✅")
+        logger.info("Facebook authentication confirmed [OK]")
 
         # Initialize publisher
         publisher = Publisher(
@@ -148,13 +151,13 @@ async def run_bot(mode: str = "DRY_RUN", config_path: str = "config.yaml"):
 
             # Log result
             status_icon = {
-                "SUCCESS": "✅",
-                "FAILED": "❌",
-                "SKIPPED": "⏭",
-                "REQUIRES_MANUAL_ACTION": "⚠️",
-                "FACEBOOK_RESTRICTION": "🚫",
+                "SUCCESS": "[OK]",
+                "FAILED": "[FAIL]",
+                "SKIPPED": "[SKIP]",
+                "REQUIRES_MANUAL_ACTION": "[WARN]",
+                "FACEBOOK_RESTRICTION": "[BLOCKED]",
             }
-            icon = status_icon.get(result["status"], "❓")
+            icon = status_icon.get(result["status"], "[??]")
             logger.info(
                 f"{icon} {result['status']}: {result['group_name'] or group_url}"
             )
@@ -183,10 +186,6 @@ async def run_bot(mode: str = "DRY_RUN", config_path: str = "config.yaml"):
     for status, count in stats.items():
         logger.info(f"  {status}: {count}")
     logger.info("=" * 60)
-
-
-# Import random at module level for the pause calculation
-import random
 
 
 def main():

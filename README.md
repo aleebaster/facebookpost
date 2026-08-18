@@ -1,8 +1,8 @@
-# Facebook Property Posting Bot 🏠
+# Facebook Property Posting Bot
 
 Automated bot for posting property listings to Facebook groups using browser automation with Playwright.
 
-## ⚠️ Safety Features
+## Safety Features
 
 - **Uses your existing Chrome session** — no passwords stored
 - **Never bypasses** CAPTCHA, security checks, or Facebook protections
@@ -13,8 +13,8 @@ Automated bot for posting property listings to Facebook groups using browser aut
 ## Requirements
 
 - Python 3.10+
-- Google Chrome installed
-- Facebook account (logged in Chrome)
+- Google Chrome installed (system Chrome, not Playwright Chromium)
+- Facebook account logged in within Chrome Profile 2
 
 ## Installation
 
@@ -31,16 +31,47 @@ venv\Scripts\activate   # Windows
 # Install dependencies
 pip install -r requirements.txt
 
-# Install Playwright browsers (one-time)
+# Install Playwright browsers (required for automation)
 playwright install chromium
 
 # Copy and edit configuration
 copy .env.example .env
 ```
 
+## Chrome Profile Setup
+
+The bot uses your **existing Chrome Profile 2** where you are already logged into Facebook.
+
+**Do NOT** log into Facebook through the bot. The bot reads your existing session.
+
+### Configuration
+
+In `config.yaml`:
+
+```yaml
+browser:
+  user_data_dir: "C:\Users\andre\AppData\Local\Google\Chrome\User Data"
+  profile_name: "Profile 2"
+```
+
+- `user_data_dir` — Chrome's User Data root directory (NOT a profile subfolder)
+- `profile_name` — The profile folder name inside User Data (e.g. "Default", "Profile 2")
+
+### IMPORTANT: Close Chrome Before Running
+
+Playwright cannot access a Chrome profile that is already open in Chrome.
+
+**Before running the bot:**
+1. Close ALL Chrome windows that use Profile 2
+2. Then run the bot
+3. After the bot finishes, you can reopen Chrome normally
+
+If you see: `Chrome profile is currently locked by another Chrome instance!`
+- Close Chrome with Profile 2 and try again
+
 ## Configuration
 
-### 1. Add Facebook Group URLs
+### Add Facebook Group URLs
 
 Edit `data/groups.txt` — one URL per line:
 
@@ -49,17 +80,16 @@ https://www.facebook.com/groups/123456789
 https://www.facebook.com/groups/realestate-burshytyn
 ```
 
-### 2. Add Photo URLs
+### Add Photo URLs
 
 Edit `data/photos.txt` — one URL or local path per line:
 
 ```
 https://example.com/house-photo-1.jpg
-https://example.com/house-photo-2.jpg
 C:\Users\You\Pictures\house.jpg
 ```
 
-### 3. Add Video URLs
+### Add Video URLs
 
 Edit `data/videos.txt` — one URL or local path per line:
 
@@ -67,7 +97,7 @@ Edit `data/videos.txt` — one URL or local path per line:
 https://example.com/house-tour.mp4
 ```
 
-### 4. Configure Timing
+### Configure Timing
 
 Edit `config.yaml`:
 
@@ -79,15 +109,6 @@ timing:
   form_delay: 3             # Seconds before form interactions
   submit_delay: 5           # Seconds after submitting
 ```
-
-### 5. Authorize Facebook
-
-```bash
-# First run — log in manually in the browser window
-python -m src.main --mode DRY_RUN
-```
-
-The bot will open Chrome and navigate to Facebook. Log in manually. After login, the browser session is saved for future runs.
 
 ## Usage
 
@@ -145,15 +166,7 @@ facebookpost/
 
 ## Publication Log
 
-All publications are logged to `data/publications.db` (SQLite). View with:
-
-```python
-from src.database import PublicationLog
-
-db = PublicationLog()
-stats = db.get_stats()
-print(stats)
-```
+All publications are logged to `data/publications.db` (SQLite).
 
 ### Status Types
 
@@ -163,7 +176,7 @@ print(stats)
 - `REQUIRES_MANUAL_ACTION` — Facebook requires verification
 - `FACEBOOK_RESTRICTION` — Facebook restriction detected
 
-## ⚡ When the Bot Stops
+## When the Bot Stops
 
 The bot automatically stops and alerts you if:
 
