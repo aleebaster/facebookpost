@@ -8,6 +8,7 @@ profile/
 cookies/
 sessions/
 auth_data/
+chrome_profile/
 *.sqlite
 *.db
 
