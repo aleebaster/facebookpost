@@ -68,8 +68,6 @@ async def run_bot(mode: str = "DRY_RUN", config_path: str = "config.yaml"):
         logger.error("No groups found! Add group URLs to data/groups.txt")
         return
 
-    logger.info(f"Loaded {group_manager.count} group(s)")
-
     # Load media
     media_manager = MediaManager(
         photos_file=media_config.get("photos_file", "data/photos.txt"),
@@ -81,13 +79,14 @@ async def run_bot(mode: str = "DRY_RUN", config_path: str = "config.yaml"):
     # Show media summary
     photos_dir = Path(media_config.get("photos_dir", "data/photos"))
     videos_dir = Path(media_config.get("videos_dir", "data/videos"))
-    logger.info(f"Photos directory:")
-    logger.info(f"  {photos_dir.resolve()}")
-    logger.info(f"Videos directory:")
-    logger.info(f"  {videos_dir.resolve()}")
     photo_count = len(media_manager.photos)
     video_count = len(media_manager.videos)
+
+    logger.info(f"Photos directory:")
+    logger.info(f"  {photos_dir.resolve()}")
     logger.info(f"Photos found: {photo_count}")
+    logger.info(f"Videos directory:")
+    logger.info(f"  {videos_dir.resolve()}")
     logger.info(f"Videos found: {video_count}")
 
     # Generate content variations
@@ -95,7 +94,6 @@ async def run_bot(mode: str = "DRY_RUN", config_path: str = "config.yaml"):
         num_variations=content_config.get("number_of_variations", 6)
     )
     content_generator.generate()
-    logger.info(f"Generated {len(content_generator._generated)} text variations")
 
     # Initialize database
     db_path = config.get("database", {}).get("path", "data/publications.db")
@@ -113,17 +111,21 @@ async def run_bot(mode: str = "DRY_RUN", config_path: str = "config.yaml"):
     try:
         page = await browser.start()
 
-        # Open Facebook
+        # Open Facebook - MUST succeed before proceeding
         fb_opened = await browser.open_facebook()
         if not fb_opened:
-            logger.error("Failed to open Facebook. Exiting.")
+            logger.error("")
+            logger.error("CRITICAL: Facebook was NOT opened.")
+            logger.error("Cannot proceed without authenticated Facebook session.")
+            logger.error("Stopping workflow.")
             return
 
-        # Check if logged in
+        # Check if logged in - MUST succeed before proceeding
         is_logged_in = await browser.check_facebook_auth()
 
         if not is_logged_in:
-            logger.warning("Not logged into Facebook!")
+            logger.error("")
+            logger.error("CRITICAL: Facebook session is NOT authenticated.")
             if mode in ("MANUAL_APPROVAL", "AUTO"):
                 logger.info("Please log into Facebook in the browser window...")
                 logged_in = await browser.wait_for_login(timeout_minutes=5)
@@ -133,10 +135,13 @@ async def run_bot(mode: str = "DRY_RUN", config_path: str = "config.yaml"):
             else:
                 logger.error(
                     "Facebook session is not authenticated in Chrome Profile 2.\n"
-                    "Please log into Facebook manually in Chrome Profile 2 "
+                    "Please log into Facebook manually in Chrome Profile 2\n"
                     "and run the bot again."
                 )
                 return
+
+        # Both conditions met - safe to proceed
+        logger.info(f"Loaded {group_manager.count} group(s)")
 
         # Initialize publisher
         publisher = Publisher(
@@ -155,9 +160,13 @@ async def run_bot(mode: str = "DRY_RUN", config_path: str = "config.yaml"):
         total = group_manager.count
         for i, group_url in enumerate(group_manager):
             group_num = i + 1
+
+            # Log current working page before each group
+            current_page_url = page.url
             logger.info("")
             logger.info("=" * 60)
             logger.info(f"[{group_num}/{total}]")
+            logger.info(f"CURRENT WORKING PAGE: {current_page_url}")
             logger.info(f"Target group:")
             logger.info(f"  {group_url}")
             logger.info("=" * 60)
@@ -190,6 +199,9 @@ async def run_bot(mode: str = "DRY_RUN", config_path: str = "config.yaml"):
             logger.info(f"Result: {label} {result['status']}")
             if result["error"]:
                 logger.info(f"Detail: {result['error']}")
+
+            # Log current page after group processing
+            logger.info(f"CURRENT WORKING PAGE: {page.url}")
 
             # Pause between groups (except after last group)
             if i < group_manager.count - 1:
